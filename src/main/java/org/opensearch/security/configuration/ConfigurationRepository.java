@@ -40,6 +40,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -48,12 +49,20 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import java.io.IOException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.ImmutableMap;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import com.google.common.hash.Hashing;
+import java.nio.charset.StandardCharsets;
+
+import org.opensearch.action.support.WriteRequest.RefreshPolicy;
 
 import org.opensearch.ExceptionsHelper;
 import org.opensearch.OpenSearchException;
@@ -78,7 +87,9 @@ import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.Strings;
 import org.opensearch.core.rest.RestStatus;
 import org.opensearch.core.xcontent.MediaTypeRegistry;
+import org.opensearch.common.xcontent.XContentType;
 import org.opensearch.env.Environment;
+import org.opensearch.security.DefaultObjectMapper;
 import org.opensearch.security.auditlog.AuditLog;
 import org.opensearch.security.auditlog.config.AuditConfig;
 import org.opensearch.security.securityconf.DynamicConfigFactory;
@@ -91,6 +102,9 @@ import org.opensearch.security.support.ConfigHelper;
 import org.opensearch.security.support.SecurityIndexHandler;
 import org.opensearch.security.support.SecurityUtils;
 import org.opensearch.threadpool.ThreadPool;
+import org.opensearch.security.configuration.SecurityConfigVersionDocument;
+import org.opensearch.security.configuration.SecurityConfigVersionDocument.SecurityConfig;
+import org.opensearch.security.configuration.SecurityConfigDiffCalculator;
 
 import static org.opensearch.security.support.ConfigConstants.SECURITY_ALLOW_DEFAULT_INIT_USE_CLUSTER_STATE;
 
@@ -98,6 +112,7 @@ public class ConfigurationRepository implements ClusterStateListener {
     private static final Logger LOGGER = LogManager.getLogger(ConfigurationRepository.class);
 
     private final String securityIndex;
+    private final String opendistroSecurityConfigVersionsIndex;
     private final Client client;
     private final Cache<CType<?>, SecurityDynamicConfiguration<?>> configCache;
     private final List<ConfigurationChangeListener> configurationChangedListener;
@@ -122,6 +137,7 @@ public class ConfigurationRepository implements ClusterStateListener {
     // visible for testing
     protected ConfigurationRepository(
         final String securityIndex,
+        final String opendistroSecurityConfigVersionsIndex,
         final Settings settings,
         final Path configPath,
         final ThreadPool threadPool,
@@ -131,6 +147,7 @@ public class ConfigurationRepository implements ClusterStateListener {
         final SecurityIndexHandler securityIndexHandler
     ) {
         this.securityIndex = securityIndex;
+        this.opendistroSecurityConfigVersionsIndex = opendistroSecurityConfigVersionsIndex;
         this.settings = settings;
         this.configPath = configPath;
         this.client = client;
@@ -295,6 +312,17 @@ public class ConfigurationRepository implements ClusterStateListener {
                     }
                 }
             }
+
+            LOGGER.info("Log before creating new system index, .opendistro_security_config_versions");
+            //Creating new system index, .opendistro_security_config_versions
+            createOpendistroSecurityConfigVersionsIndexIfAbsent();
+            waitForOpendistroSecurityConfigVersionsIndexToBeAtLeastYellow();
+
+            // Building new version document and saving it to the new system index (.opendistro_security_config_versions)
+            String nextVersionId = fetchNextVersionId();
+            SecurityConfigVersionDocument.Version version = buildVersionFromSecurityIndex(nextVersionId);
+            saveCurrentVersionToSystemIndex(version);
+
             setupAuditConfigurationIfAny(cl.isAuditConfigDocPresentInIndex());
             LOGGER.info("Node '{}' initialized", clusterService.localNode().getName());
 
@@ -303,6 +331,373 @@ public class ConfigurationRepository implements ClusterStateListener {
         }
     }
 
+    @SuppressWarnings("unchecked")
+    private String fetchNextVersionId() {
+        try {
+            var getRequest = new org.opensearch.action.get.GetRequest(opendistroSecurityConfigVersionsIndex, "opendistro_security_config_versions");
+            var getResponse = client.get(getRequest).actionGet();
+    
+            if (!getResponse.isExists()) {
+                return "v1"; // first version
+            }
+    
+            Map<String, Object> docMap = DefaultObjectMapper.objectMapper.readValue(
+                getResponse.getSourceAsString(),
+                Map.class
+            );
+    
+            List<Object> versionsList = (List<Object>) docMap.get("versions");
+            if (versionsList == null || versionsList.isEmpty()) {
+                return "v1";
+            }
+    
+            Map<String, Object> latestVersionMap = (Map<String, Object>) versionsList.get(versionsList.size() - 1);
+    
+            String versionId = (String) latestVersionMap.get("version_id");
+            if (versionId == null || !versionId.startsWith("v")) {
+                return "v1";
+            }
+    
+            int currentVersionNumber = Integer.parseInt(versionId.substring(1));
+            return "v" + (currentVersionNumber + 1);
+    
+        } catch (Exception e) {
+            LOGGER.error("Failed to fetch latest version from {}", opendistroSecurityConfigVersionsIndex, e);
+            throw new RuntimeException("Failed to fetch next version id", e);
+        }
+    }    
+    
+    private void saveCurrentVersionToSystemIndex(SecurityConfigVersionDocument.Version version) {
+        try {
+            var getRequest = new org.opensearch.action.get.GetRequest(opendistroSecurityConfigVersionsIndex, "opendistro_security_config_versions");
+            var getResponse = client.get(getRequest).actionGet();
+            
+            // Map<String, Object> docMap;
+            // if (getResponse.isExists()) {
+            //     docMap = DefaultObjectMapper.objectMapper.readValue(
+            //         getResponse.getSourceAsString(),
+            //         new TypeReference<Map<String, Object>>() {}
+            //     );
+            // } else {
+            //     docMap = new HashMap<>();
+            // }
+            
+            // Reconstruct the document from the raw map
+            //SecurityConfigVersionDocument document = mapToVersionDocument(docMap);
+            SecurityConfigVersionDocument document;
+            if (getResponse.isExists()) {
+                document = DefaultObjectMapper.readValue(getResponse.getSourceAsString(), SecurityConfigVersionDocument.class);
+            } else {
+                document = new SecurityConfigVersionDocument();
+            }
+            
+            // If there is already at least one version, compare security_configs hash
+            if (!document.getVersions().isEmpty()) {
+                SecurityConfigVersionDocument.Version latestVersion = document.getVersions().get(document.getVersions().size() - 1);
+                // String latestHash = computeSecurityConfigsHash(latestVersion);
+                // String newHash = computeSecurityConfigsHash(version);
+                // LOGGER.info("Latest hash: {}", latestHash);
+                // LOGGER.info("New hash: {}", newHash);
+
+                // if (latestHash.equals(newHash)) {
+                //     LOGGER.info("No changes detected in security configuration. Skipping version update.");
+                //     return; // Skip saving a new version if content hasn't changed
+                // }
+                Map<String, SecurityConfig> latestConfigMap = latestVersion.getSecurity_configs(); //convertVersionToMap(latestVersion);
+                Map<String, SecurityConfig> newConfigMap =  version.getSecurity_configs(); //convertVersionToMap(version);
+                
+                if (!SecurityConfigDiffCalculator.hasSecurityConfigChanged(latestConfigMap, newConfigMap)) {
+                    LOGGER.info("No changes detected in security configuration. Skipping version update.");
+                    return;
+                }
+            }
+            
+            // Otherwise, add the new version and update the document
+            document.addVersion(version);
+            Map<String, Object> updatedDocMap = document.toMap();
+            String json = DefaultObjectMapper.objectMapper.writeValueAsString(updatedDocMap);
+            
+            var indexRequest = new org.opensearch.action.index.IndexRequest(opendistroSecurityConfigVersionsIndex)
+                .id("opendistro_security_config_versions")
+                .source(json, XContentType.JSON)
+                .setRefreshPolicy(RefreshPolicy.IMMEDIATE);
+            
+            client.index(indexRequest).actionGet();
+            
+            LOGGER.info("Successfully saved version {} to {}", version.getVersion_id(), opendistroSecurityConfigVersionsIndex);
+            
+        } catch (Exception e) {
+            LOGGER.error("Failed to save version to {}", opendistroSecurityConfigVersionsIndex, e);
+            throw ExceptionsHelper.convertToOpenSearchException(e);
+        }
+    }        
+    
+    @SuppressWarnings("unchecked")
+    private SecurityConfigVersionDocument mapToVersionDocument(Map<String, Object> docMap) {
+        SecurityConfigVersionDocument result = new SecurityConfigVersionDocument();
+        if (docMap == null) {
+            return result;
+        }
+    
+        List<Object> versionsList = (List<Object>) docMap.get("versions");
+        if (versionsList == null) {
+            return result;
+        }
+    
+        for (Object obj : versionsList) {
+            Map<String, Object> versionMap = (Map<String, Object>) obj;
+            String vid = (String) versionMap.get("version_id");
+            String ts = (String) versionMap.get("timestamp");
+    
+            Map<String, Object> scsMap = (Map<String, Object>) versionMap.get("security_configs");
+            Map<String, SecurityConfigVersionDocument.SecurityConfig> scConverted = new HashMap<>();
+            if (scsMap != null) {
+                for (Map.Entry<String, Object> scEntry : scsMap.entrySet()) {
+                    String type = scEntry.getKey();
+                    Map<String, Object> scValue = (Map<String, Object>) scEntry.getValue();
+                    String lastUpdated = (String) scValue.get("lastUpdated");
+                    Map<String, Object> configData = (Map<String, Object>) scValue.get("configData");
+                    SecurityConfigVersionDocument.SecurityConfig scObj = new SecurityConfigVersionDocument.SecurityConfig(lastUpdated, configData);
+                    scConverted.put(type, scObj);
+                }
+            }
+    
+            SecurityConfigVersionDocument.Version verObj = new SecurityConfigVersionDocument.Version(vid, ts, scConverted);
+            result.addVersion(verObj);
+        }
+        return result;
+    }
+    
+    // private String computeSecurityConfigsHash(SecurityConfigVersionDocument.Version version) throws JsonProcessingException {
+    //     Map<String, Object> normalizedConfigs = new HashMap<>();
+    //     for (Map.Entry<String, SecurityConfigVersionDocument.SecurityConfig> entry : version.getSecurity_configs().entrySet()) {
+    //         if (entry.getValue() != null) {
+    //             Map<String, Object> configMap = new HashMap<>(entry.getValue().toMap());
+    //             configMap.remove("lastUpdated");
+    //             normalizedConfigs.put(entry.getKey(), configMap);
+    //         }
+    //     }
+    //     String json = DefaultObjectMapper.objectMapper.writeValueAsString(normalizedConfigs);
+    //     return Hashing.sha256().hashString(json, StandardCharsets.UTF_8).toString();
+    // } 
+     
+    private String computeSecurityConfigsHash(SecurityConfigVersionDocument.Version version) throws JsonProcessingException {
+        Map<String, Object> normalizedConfigs = new TreeMap<>();
+        for (Map.Entry<String, SecurityConfigVersionDocument.SecurityConfig> entry : version.getSecurity_configs().entrySet()) {
+            if (entry.getValue() != null) {
+                Map<String, Object> configMap = new TreeMap<>(entry.getValue().toMap());
+                configMap.remove("lastUpdated");
+                normalizedConfigs.put(entry.getKey(), configMap);
+            }
+        }
+        String json = DefaultObjectMapper.objectMapper.writeValueAsString(normalizedConfigs);
+        return Hashing.sha256().hashString(json, StandardCharsets.UTF_8).toString();
+    }
+
+
+    public SecurityConfigVersionDocument.Version buildVersionFromSecurityIndex(String versionId) throws IOException {
+        Instant now = Instant.now();
+        String timestamp = now.toString();
+        SecurityConfigVersionDocument.Version version = new SecurityConfigVersionDocument.Version(versionId, timestamp, new HashMap<>());
+    
+        for (CType<?> cType : CType.values()) {
+            // Load configuration from the system index for this type
+            SecurityConfigVersionDocument.SecurityConfig config = loadSecurityConfigFromSystemIndex(cType);
+            // If the config is missing or its data is null, substitute an empty map.
+            if (config == null || config.getConfigData() == null) {
+                config = new SecurityConfigVersionDocument.SecurityConfig(timestamp, new HashMap<>());
+            }
+            version.addSecurityConfig(cType.toLCString(), config);
+        }
+        return version;
+    }
+    
+    // private SecurityConfigVersionDocument.SecurityConfig loadSecurityConfigFromSystemIndex(CType<?> cType) throws IOException {
+    //     SecurityDynamicConfiguration<?> dynamicConfig = getConfiguration(cType);
+    //     if (dynamicConfig == null || dynamicConfig.getCEntries().isEmpty()) {
+    //         LOGGER.debug("{} is empty in the system index, returning null", cType.toString());
+    //         return null;
+    //     }
+    //     @SuppressWarnings("unchecked")
+    //     Map<String, SecurityDynamicConfiguration<?>> configData = (Map<String, SecurityDynamicConfiguration<?>>) dynamicConfig.getCEntries();
+    //     return new SecurityConfigVersionDocument.SecurityConfig(Instant.now().toString(), configData);
+    // }    
+
+    // private SecurityConfigVersionDocument.SecurityConfig loadSecurityConfigFromSystemIndex(CType<?> cType) throws IOException {
+    //     SecurityDynamicConfiguration<?> dynamicConfig = getConfiguration(cType);
+    //     if (dynamicConfig == null || dynamicConfig.getCEntries().isEmpty()) {
+    //         LOGGER.debug("{} is empty in the system index, returning null", cType.toString());
+    //         return null;
+    //     }
+        
+    //     Map<String, Object> configData = new TreeMap<>();
+    //     for (Map.Entry<String, ?> entry : dynamicConfig.getCEntries().entrySet()) {
+    //         Object value = entry.getValue();
+    //         if (value instanceof Map) {
+    //             @SuppressWarnings("unchecked")
+    //             Map<String, Object> innerMap = (Map<String, Object>) value;
+    //             configData.put(entry.getKey(), innerMap);
+    //         } else {
+    //             configData.put(entry.getKey(), DefaultObjectMapper.objectMapper.convertValue(value, Map.class));
+    //         }
+    //     }
+    
+    //     return new SecurityConfigVersionDocument.SecurityConfig(Instant.now().toString(), configData);
+    // }    
+
+    private SecurityConfigVersionDocument.SecurityConfig loadSecurityConfigFromSystemIndex(CType<?> cType) throws IOException {
+        SecurityDynamicConfiguration<?> dynamicConfig = getConfiguration(cType);
+        if (dynamicConfig == null || dynamicConfig.getCEntries().isEmpty()) {
+            LOGGER.debug("{} is empty in the system index, returning null", cType.toString());
+            return null;
+        }
+        
+        Map<String, Object> configData = new TreeMap<>();
+        for (Map.Entry<String, ?> entry : dynamicConfig.getCEntries().entrySet()) {
+            configData.put(entry.getKey(), convertObjectToMap(entry.getValue()));
+        }
+    
+        return new SecurityConfigVersionDocument.SecurityConfig(Instant.now().toString(), configData);
+    }
+    
+    private static Object convertObjectToMap(Object obj) {
+        if (obj == null) {
+            return null;
+        }
+    
+        if (obj instanceof Map) {
+            // Recursively convert all map values
+            Map<?, ?> originalMap = (Map<?, ?>) obj;
+            Map<String, Object> convertedMap = new TreeMap<>();
+            for (Map.Entry<?, ?> entry : originalMap.entrySet()) {
+                convertedMap.put(String.valueOf(entry.getKey()), convertObjectToMap(entry.getValue()));
+            }
+            return convertedMap;
+        }
+    
+        if (obj instanceof List) {
+            // Recursively convert all list elements
+            List<?> originalList = (List<?>) obj;
+            List<Object> convertedList = new ArrayList<>();
+            for (Object item : originalList) {
+                convertedList.add(convertObjectToMap(item));
+            }
+            return convertedList;
+        }
+    
+        if (obj instanceof Set) {
+            // Convert Set to List and apply recursive conversion
+            List<Object> convertedList = ((Set<?>) obj).stream()
+                    .map(ConfigurationRepository::convertObjectToMap)
+                    .collect(Collectors.toList());
+            return convertedList;
+        }
+    
+        if (obj instanceof SecurityDynamicConfiguration<?>) {
+            // Extract data from SecurityDynamicConfiguration
+            return extractConfigData((SecurityDynamicConfiguration<?>) obj);
+        }
+    
+        if (obj.getClass().getName().startsWith("java.")) {
+            // If it's a Java built-in type (String, Integer, Boolean, etc.), return as-is
+            return obj;
+        }
+    
+        // Convert any other complex object into a map using Jackson
+        return DefaultObjectMapper.objectMapper.convertValue(obj, Map.class);
+    }
+    
+    /**
+     * Extracts meaningful data from SecurityDynamicConfiguration<?>.
+     */
+    private static Map<String, Object> extractConfigData(SecurityDynamicConfiguration<?> config) {
+        Map<String, Object> extractedMap = new TreeMap<>();
+        Map<String, ?> configEntries = config.getCEntries();
+    
+        if (configEntries != null) {
+            for (Map.Entry<String, ?> entry : configEntries.entrySet()) {
+                extractedMap.put(entry.getKey(), convertObjectToMap(entry.getValue()));
+            }
+        }
+        return extractedMap;
+    }      
+    
+    public void updateSecurityConfigVersionAfterUpdate() {
+        try {
+            String nextVersionId = fetchNextVersionId();
+    
+            //Build version from .opensearch_security
+            SecurityConfigVersionDocument.Version newVersion = buildVersionFromSecurityIndex(nextVersionId);
+            if (newVersion == null) {
+                LOGGER.warn("Skipping version update: newVersion is null");
+                return;
+            }
+    
+            //Load the existing doc from .opendistro_security_config_versions
+            var getRequest = new org.opensearch.action.get.GetRequest(opendistroSecurityConfigVersionsIndex, "opendistro_security_config_versions");
+            var getResponse = client.get(getRequest).actionGet();
+    
+            SecurityConfigVersionDocument document;
+            if (getResponse.isExists()) {
+                document = DefaultObjectMapper.readValue(getResponse.getSourceAsString(), SecurityConfigVersionDocument.class);
+            } else {
+                document = new SecurityConfigVersionDocument();
+            }
+    
+            if (!document.getVersions().isEmpty()) {
+                SecurityConfigVersionDocument.Version latestVersion = document.getVersions().get(document.getVersions().size()-1);
+    
+                // String latestHash = computeSecurityConfigsHash(latestVersion);
+                // String newHash = computeSecurityConfigsHash(newVersion);
+    
+                // if (latestHash.equals(newHash)) {
+                //     LOGGER.info("No changes detected in security configuration. Skipping version update.");
+                //     return;
+                // }
+
+                Map<String, SecurityConfig> latestConfigMap = latestVersion.getSecurity_configs(); //convertVersionToMap(latestVersion);
+                Map<String, SecurityConfig> newConfigMap =  newVersion.getSecurity_configs(); //convertVersionToMap(newVersion);
+                
+                if (!SecurityConfigDiffCalculator.hasSecurityConfigChanged(latestConfigMap, newConfigMap)) {
+                    LOGGER.info("No changes detected in security configuration. Skipping version update.");
+                    return;
+                }                
+            }
+    
+            document.addVersion(newVersion);
+    
+            Map<String, Object> updatedDocMap = document.toMap();
+            String json = DefaultObjectMapper.objectMapper.writeValueAsString(updatedDocMap);
+    
+            var indexRequest = new org.opensearch.action.index.IndexRequest(opendistroSecurityConfigVersionsIndex)
+                .id("opendistro_security_config_versions")
+                .source(json, XContentType.JSON)
+                .setRefreshPolicy(RefreshPolicy.IMMEDIATE);
+    
+            client.index(indexRequest).actionGet();
+            LOGGER.info("Successfully saved new security config version {}", newVersion.getVersion_id());
+        } catch (Exception e) {
+            LOGGER.error("Failed to update security config version doc", e);
+        }
+    }
+
+    // private Map<String, SecurityConfig> convertVersionToMap(SecurityConfigVersionDocument.Version version) {
+    //     Map<String, SecurityConfig> normalizedConfigs = new TreeMap<>();
+    //     for (Map.Entry<String, SecurityConfigVersionDocument.SecurityConfig> entry : version.getSecurity_configs().entrySet()) {
+    //         if (entry.getValue() != null) {
+    //             try {
+    //                 // Instead of converting to JSON, normalize the config map directly.
+    //                 Map<String, SecurityConfig> configMap = entry.getValue().toMap();
+    //                 //Map<String, Object> normalized = SecurityConfigDiffCalculator.normalize(configMap);
+    //                 normalizedConfigs.put(entry.getKey(), configMap);
+    //             } catch (Exception e) {
+    //                 LOGGER.error("Failed to normalize security config for version {}", version.getVersion_id(), e);
+    //             }
+    //         }
+    //     }
+    //     return normalizedConfigs;
+    // }    
+      
     private void setupAuditConfigurationIfAny(final boolean auditConfigDocPresent) {
         final Set<String> deprecatedAuditKeysInSettings = AuditConfig.getDeprecatedKeys(settings);
         if (!deprecatedAuditKeysInSettings.isEmpty()) {
@@ -337,6 +732,43 @@ public class ConfigurationRepository implements ClusterStateListener {
         }
     }
 
+    private boolean createOpendistroSecurityConfigVersionsIndexIfAbsent() {
+        try {
+            final Map<String, Object> indexSettings = ImmutableMap.of(
+                "index.number_of_shards", 1,
+                "index.auto_expand_replicas", "0-all"
+            );
+    
+            final Map<String, Object> mappings = Map.of(
+                "properties", Map.of(
+                    "versions", Map.of(
+                        "type", "nested",
+                        "properties", Map.of(
+                            "version_id", Map.of("type", "keyword"),
+                            "timestamp", Map.of("type", "date"),
+                            "security_configs", Map.of("type", "object")
+                        )
+                    )
+                )
+            );            
+            LOGGER.info("Index request for {}", opendistroSecurityConfigVersionsIndex);
+            final CreateIndexRequest createIndexRequest = new CreateIndexRequest(opendistroSecurityConfigVersionsIndex)
+                .settings(indexSettings)
+                .mapping(mappings);
+    
+            final boolean ok = client.admin().indices().create(createIndexRequest).actionGet().isAcknowledged();
+            LOGGER.info("Index {} created?: {}", opendistroSecurityConfigVersionsIndex, ok);
+            return ok;
+        } catch (ResourceAlreadyExistsException resourceAlreadyExistsException) {
+            LOGGER.info("Index {} already exists", opendistroSecurityConfigVersionsIndex);
+            return false;
+        } catch (Exception e) {
+            LOGGER.error("Failed to create index {}", opendistroSecurityConfigVersionsIndex, e);
+            throw e;
+        }
+    }
+    
+
     private void waitForSecurityIndexToBeAtLeastYellow() {
         LOGGER.info("Node started, try to initialize it. Wait for at least yellow cluster state....");
         ClusterHealthResponse response = null;
@@ -363,6 +795,38 @@ public class ConfigurationRepository implements ClusterStateListener {
             }
             try {
                 response = client.admin().cluster().health(new ClusterHealthRequest(securityIndex).waitForYellowStatus()).actionGet();
+            } catch (Exception e) {
+                LOGGER.debug("Caught again a {} but we just try again ...", e.toString());
+            }
+        }
+    }
+
+    private void waitForOpendistroSecurityConfigVersionsIndexToBeAtLeastYellow() {
+        LOGGER.info("Node started, try to initialize it. Wait for at least yellow cluster state....");
+        ClusterHealthResponse response = null;
+        try {
+            response = client.admin()
+                .cluster()
+                .health(new ClusterHealthRequest(opendistroSecurityConfigVersionsIndex).waitForActiveShards(1).waitForYellowStatus())
+                .actionGet();
+        } catch (Exception e) {
+            LOGGER.debug("Caught a {} but we just try again ...", e.toString());
+        }
+
+        while (response == null || response.isTimedOut() || response.getStatus() == ClusterHealthStatus.RED) {
+            LOGGER.debug(
+                "index '{}' not healthy yet, we try again ... (Reason: {})",
+                opendistroSecurityConfigVersionsIndex,
+                response == null ? "no response" : (response.isTimedOut() ? "timeout" : "other, maybe red cluster")
+            );
+            try {
+                TimeUnit.MILLISECONDS.sleep(500);
+            } catch (InterruptedException e) {
+                // ignore
+                Thread.currentThread().interrupt();
+            }
+            try {
+                response = client.admin().cluster().health(new ClusterHealthRequest(opendistroSecurityConfigVersionsIndex).waitForYellowStatus()).actionGet();
             } catch (Exception e) {
                 LOGGER.debug("Caught again a {} but we just try again ...", e.toString());
             }
@@ -488,8 +952,15 @@ public class ConfigurationRepository implements ClusterStateListener {
             ConfigConstants.SECURITY_CONFIG_INDEX_NAME,
             ConfigConstants.OPENDISTRO_SECURITY_DEFAULT_CONFIG_INDEX
         );
+        final var opendistroSecurityConfigVersionsIndex = settings.get(
+            ConfigConstants.SECURITY_CONFIG_VERSIONS_INDEX_NAME,
+            ConfigConstants.OPENDISTRO_SECURITY_CONFIG_VERSIONS_INDEX);
+        
+        LOGGER.info("Loaded settings - securityIndex: '{}', opendistroSecurityConfigVersionsIndex: '{}'", securityIndex, opendistroSecurityConfigVersionsIndex);
+
         return new ConfigurationRepository(
             securityIndex,
+            opendistroSecurityConfigVersionsIndex,
             settings,
             configPath,
             threadPool,

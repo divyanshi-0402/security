@@ -339,12 +339,33 @@ public abstract class AbstractApiAction extends BaseRestHandler {
         return ValidationResult.success(securityConfiguration);
     }
 
+    // final void saveOrUpdateConfiguration(
+    //     final Client client,
+    //     final SecurityDynamicConfiguration<?> configuration,
+    //     final OnSucessActionListener<IndexResponse> onSucessActionListener
+    // ) {
+    //     saveAndUpdateConfigsAsync(securityApiDependencies, client, getConfigType(), configuration, onSucessActionListener);
+    // }
+
     final void saveOrUpdateConfiguration(
         final Client client,
         final SecurityDynamicConfiguration<?> configuration,
         final OnSucessActionListener<IndexResponse> onSucessActionListener
     ) {
-        saveAndUpdateConfigsAsync(securityApiDependencies, client, getConfigType(), configuration, onSucessActionListener);
+        saveAndUpdateConfigsAsync(securityApiDependencies, client, getConfigType(), configuration, new OnSucessActionListener<IndexResponse>(onSucessActionListener.channel) {
+            @Override
+            public void onResponse(IndexResponse response) {
+                onSucessActionListener.onResponse(response);
+    
+                threadPool.generic().submit(() -> {
+                    try {
+                        securityApiDependencies.configurationRepository().updateSecurityConfigVersionAfterUpdate();
+                    } catch (Exception e) {
+                        LOGGER.error("Failed to update config version after update", e);
+                    }
+                });
+            }
+        });
     }
 
     protected final String nameParam(final RestRequest request) {
