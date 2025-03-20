@@ -1,0 +1,123 @@
+package org.opensearch.security.configuration;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import org.opensearch.security.securityconf.impl.SecurityDynamicConfiguration;
+
+// Represents the document structure for the .opendistro_security_config_versions system index.
+public class SecurityConfigVersionDocument {
+
+    private final List<Version> versions;
+
+    @JsonCreator
+    public SecurityConfigVersionDocument(@JsonProperty("versions") List<Version> versions) {
+        this.versions = (versions != null) ? versions : new ArrayList<>();
+    }
+
+    // No-arg constructor
+    public SecurityConfigVersionDocument() {
+        this.versions = new ArrayList<>();
+    }
+
+    @JsonProperty("versions")
+    public List<Version> getVersions() {
+        return versions;
+    }
+
+    public void addVersion(Version version) {
+        versions.add(version);
+    }
+
+    public Map<String, Object> toMap() {
+        Map<String, Object> docMap = new HashMap<>();
+        List<Map<String, Object>> versionsList = new ArrayList<>();
+        for (Version v : versions) {
+            versionsList.add(v.toMap());
+        }
+        docMap.put("versions", versionsList);
+        return docMap;
+    }
+
+    public static class Version {
+        private final String version_id;
+        private final String timestamp;
+        private final Map<String, SecurityConfig> security_configs;
+
+        @JsonCreator
+        public Version(
+            @JsonProperty("version_id") String version_id,
+            @JsonProperty("timestamp") String timestamp,
+            @JsonProperty("security_configs") Map<String, SecurityConfig> security_configs
+        ) {
+            this.version_id = version_id;
+            this.timestamp = timestamp;
+            this.security_configs = (security_configs != null) ? security_configs : new HashMap<>();
+        }
+
+        @JsonProperty("version_id")
+        public String getVersion_id() {
+            return version_id;
+        }
+
+        @JsonProperty("timestamp")
+        public String getTimestamp() {
+            return timestamp;
+        }
+
+        @JsonProperty("security_configs")
+        public Map<String, SecurityConfig> getSecurity_configs() {
+            return security_configs;
+        }
+
+        public void addSecurityConfig(String type, SecurityConfig config) {
+            security_configs.put(type, config);
+        }
+
+        public Map<String, Object> toMap() {
+            Map<String, Object> versionMap = new HashMap<>();
+            versionMap.put("version_id", version_id);
+            versionMap.put("timestamp", timestamp);
+            Map<String, Object> scsMap = new HashMap<>();
+            for (Map.Entry<String, SecurityConfig> entry : security_configs.entrySet()) {
+                scsMap.put(entry.getKey(), entry.getValue().toMap());
+            }
+            versionMap.put("security_configs", scsMap);
+            return versionMap;
+        }
+    }
+
+    public static class SecurityConfig {
+        private final String lastUpdated;
+        private final Map<String, Object> configData;
+
+        @JsonCreator
+        public SecurityConfig(
+            @JsonProperty("lastUpdated") String lastUpdated,
+            @JsonProperty("configData") Map<String, Object> configData
+        ) {
+            this.lastUpdated = lastUpdated;
+            this.configData = (configData != null) ? configData : new HashMap<>();
+        }
+
+        @JsonProperty("lastUpdated")
+        public String getLastUpdated() {
+            return lastUpdated;
+        }
+
+        @JsonProperty("configData")
+        public Map<String, Object> getConfigData() {
+            return configData;
+        }
+
+        public Map<String, Object> toMap() {
+            Map<String, Object> scMap = new HashMap<>();
+            scMap.put("lastUpdated", lastUpdated);
+            scMap.put("configData", configData);
+            return scMap;
+        }
+    }
+}
