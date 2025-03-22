@@ -105,6 +105,7 @@ import org.opensearch.transport.client.Client;
 import org.opensearch.security.configuration.SecurityConfigVersionDocument;
 import org.opensearch.security.configuration.SecurityConfigVersionDocument.SecurityConfig;
 import org.opensearch.security.configuration.SecurityConfigDiffCalculator;
+import org.opensearch.security.configuration.SecurityConfigVersionsLoader;
 
 import static org.opensearch.security.support.ConfigConstants.SECURITY_ALLOW_DEFAULT_INIT_USE_CLUSTER_STATE;
 
@@ -134,6 +135,8 @@ public class ConfigurationRepository implements ClusterStateListener {
 
     private final SecurityIndexHandler securityIndexHandler;
 
+    private final SecurityConfigVersionsLoader configVersionsLoader;
+
     // visible for testing
     protected ConfigurationRepository(
         final String securityIndex,
@@ -160,6 +163,7 @@ public class ConfigurationRepository implements ClusterStateListener {
         this.cl = configurationLoaderSecurity7;
         configCache = CacheBuilder.newBuilder().build();
         this.securityIndexHandler = securityIndexHandler;
+        this.configVersionsLoader = new SecurityConfigVersionsLoader(client, settings);
     }
 
     private Path resolveConfigDir() {
@@ -327,33 +331,12 @@ public class ConfigurationRepository implements ClusterStateListener {
     @SuppressWarnings("unchecked")
     private String fetchNextVersionId() {
         try {
-            var getRequest = new org.opensearch.action.get.GetRequest(opendistroSecurityConfigVersionsIndex, "opendistro_security_config_versions");
-            var getResponse = client.get(getRequest).actionGet();
-    
-            if (!getResponse.isExists()) {
-                return "v1"; // first version
-            }
-    
-            Map<String, Object> docMap = DefaultObjectMapper.objectMapper.readValue(
-                getResponse.getSourceAsString(),
-                Map.class
-            );
-    
-            List<Object> versionsList = (List<Object>) docMap.get("versions");
-            if (versionsList == null || versionsList.isEmpty()) {
+            SecurityConfigVersionDocument.Version latestVersion = configVersionsLoader.loadLatestVersion();
+            if (latestVersion == null || latestVersion.getVersion_id() == null || !latestVersion.getVersion_id().startsWith("v")) {
                 return "v1";
             }
-    
-            Map<String, Object> latestVersionMap = (Map<String, Object>) versionsList.get(versionsList.size() - 1);
-    
-            String versionId = (String) latestVersionMap.get("version_id");
-            if (versionId == null || !versionId.startsWith("v")) {
-                return "v1";
-            }
-    
-            int currentVersionNumber = Integer.parseInt(versionId.substring(1));
+            int currentVersionNumber = Integer.parseInt(latestVersion.getVersion_id().substring(1));
             return "v" + (currentVersionNumber + 1);
-    
         } catch (Exception e) {
             LOGGER.error("Failed to fetch latest version from {}", opendistroSecurityConfigVersionsIndex, e);
             throw new RuntimeException("Failed to fetch next version id", e);
@@ -362,42 +345,13 @@ public class ConfigurationRepository implements ClusterStateListener {
     
     private void saveCurrentVersionToSystemIndex(SecurityConfigVersionDocument.Version version) {
         try {
-            var getRequest = new org.opensearch.action.get.GetRequest(opendistroSecurityConfigVersionsIndex, "opendistro_security_config_versions");
-            var getResponse = client.get(getRequest).actionGet();
+            SecurityConfigVersionDocument document = configVersionsLoader.loadFullDocument();
+            SecurityConfigVersionsLoader.sortVersionsById(document.getVersions());
             
-            // Map<String, Object> docMap;
-            // if (getResponse.isExists()) {
-            //     docMap = DefaultObjectMapper.objectMapper.readValue(
-            //         getResponse.getSourceAsString(),
-            //         new TypeReference<Map<String, Object>>() {}
-            //     );
-            // } else {
-            //     docMap = new HashMap<>();
-            // }
-            
-            // Reconstruct the document from the raw map
-            //SecurityConfigVersionDocument document = mapToVersionDocument(docMap);
-            SecurityConfigVersionDocument document;
-            if (getResponse.isExists()) {
-                document = DefaultObjectMapper.readValue(getResponse.getSourceAsString(), SecurityConfigVersionDocument.class);
-            } else {
-                document = new SecurityConfigVersionDocument();
-            }
-            
-            // If there is already at least one version, compare security_configs hash
             if (!document.getVersions().isEmpty()) {
                 SecurityConfigVersionDocument.Version latestVersion = document.getVersions().get(document.getVersions().size() - 1);
-                // String latestHash = computeSecurityConfigsHash(latestVersion);
-                // String newHash = computeSecurityConfigsHash(version);
-                // LOGGER.info("Latest hash: {}", latestHash);
-                // LOGGER.info("New hash: {}", newHash);
-
-                // if (latestHash.equals(newHash)) {
-                //     LOGGER.info("No changes detected in security configuration. Skipping version update.");
-                //     return; // Skip saving a new version if content hasn't changed
-                // }
-                Map<String, SecurityConfig> latestConfigMap = latestVersion.getSecurity_configs(); //convertVersionToMap(latestVersion);
-                Map<String, SecurityConfig> newConfigMap =  version.getSecurity_configs(); //convertVersionToMap(version);
+                Map<String, SecurityConfig> latestConfigMap = latestVersion.getSecurity_configs();
+                Map<String, SecurityConfig> newConfigMap =  version.getSecurity_configs();
                 
                 if (!SecurityConfigDiffCalculator.hasSecurityConfigChanged(latestConfigMap, newConfigMap)) {
                     LOGGER.info("No changes detected in security configuration. Skipping version update.");
@@ -425,69 +379,6 @@ public class ConfigurationRepository implements ClusterStateListener {
         }
     }        
     
-    @SuppressWarnings("unchecked")
-    private SecurityConfigVersionDocument mapToVersionDocument(Map<String, Object> docMap) {
-        SecurityConfigVersionDocument result = new SecurityConfigVersionDocument();
-        if (docMap == null) {
-            return result;
-        }
-    
-        List<Object> versionsList = (List<Object>) docMap.get("versions");
-        if (versionsList == null) {
-            return result;
-        }
-    
-        for (Object obj : versionsList) {
-            Map<String, Object> versionMap = (Map<String, Object>) obj;
-            String vid = (String) versionMap.get("version_id");
-            String ts = (String) versionMap.get("timestamp");
-    
-            Map<String, Object> scsMap = (Map<String, Object>) versionMap.get("security_configs");
-            Map<String, SecurityConfigVersionDocument.SecurityConfig> scConverted = new HashMap<>();
-            if (scsMap != null) {
-                for (Map.Entry<String, Object> scEntry : scsMap.entrySet()) {
-                    String type = scEntry.getKey();
-                    Map<String, Object> scValue = (Map<String, Object>) scEntry.getValue();
-                    String lastUpdated = (String) scValue.get("lastUpdated");
-                    Map<String, Object> configData = (Map<String, Object>) scValue.get("configData");
-                    SecurityConfigVersionDocument.SecurityConfig scObj = new SecurityConfigVersionDocument.SecurityConfig(lastUpdated, configData);
-                    scConverted.put(type, scObj);
-                }
-            }
-    
-            SecurityConfigVersionDocument.Version verObj = new SecurityConfigVersionDocument.Version(vid, ts, scConverted);
-            result.addVersion(verObj);
-        }
-        return result;
-    }
-    
-    // private String computeSecurityConfigsHash(SecurityConfigVersionDocument.Version version) throws JsonProcessingException {
-    //     Map<String, Object> normalizedConfigs = new HashMap<>();
-    //     for (Map.Entry<String, SecurityConfigVersionDocument.SecurityConfig> entry : version.getSecurity_configs().entrySet()) {
-    //         if (entry.getValue() != null) {
-    //             Map<String, Object> configMap = new HashMap<>(entry.getValue().toMap());
-    //             configMap.remove("lastUpdated");
-    //             normalizedConfigs.put(entry.getKey(), configMap);
-    //         }
-    //     }
-    //     String json = DefaultObjectMapper.objectMapper.writeValueAsString(normalizedConfigs);
-    //     return Hashing.sha256().hashString(json, StandardCharsets.UTF_8).toString();
-    // } 
-     
-    private String computeSecurityConfigsHash(SecurityConfigVersionDocument.Version version) throws JsonProcessingException {
-        Map<String, Object> normalizedConfigs = new TreeMap<>();
-        for (Map.Entry<String, SecurityConfigVersionDocument.SecurityConfig> entry : version.getSecurity_configs().entrySet()) {
-            if (entry.getValue() != null) {
-                Map<String, Object> configMap = new TreeMap<>(entry.getValue().toMap());
-                configMap.remove("lastUpdated");
-                normalizedConfigs.put(entry.getKey(), configMap);
-            }
-        }
-        String json = DefaultObjectMapper.objectMapper.writeValueAsString(normalizedConfigs);
-        return Hashing.sha256().hashString(json, StandardCharsets.UTF_8).toString();
-    }
-
-
     public SecurityConfigVersionDocument.Version buildVersionFromSecurityIndex(String versionId) throws IOException {
         Instant now = Instant.now();
         String timestamp = now.toString();
@@ -505,39 +396,6 @@ public class ConfigurationRepository implements ClusterStateListener {
         return version;
     }
     
-    // private SecurityConfigVersionDocument.SecurityConfig loadSecurityConfigFromSystemIndex(CType<?> cType) throws IOException {
-    //     SecurityDynamicConfiguration<?> dynamicConfig = getConfiguration(cType);
-    //     if (dynamicConfig == null || dynamicConfig.getCEntries().isEmpty()) {
-    //         LOGGER.debug("{} is empty in the system index, returning null", cType.toString());
-    //         return null;
-    //     }
-    //     @SuppressWarnings("unchecked")
-    //     Map<String, SecurityDynamicConfiguration<?>> configData = (Map<String, SecurityDynamicConfiguration<?>>) dynamicConfig.getCEntries();
-    //     return new SecurityConfigVersionDocument.SecurityConfig(Instant.now().toString(), configData);
-    // }    
-
-    // private SecurityConfigVersionDocument.SecurityConfig loadSecurityConfigFromSystemIndex(CType<?> cType) throws IOException {
-    //     SecurityDynamicConfiguration<?> dynamicConfig = getConfiguration(cType);
-    //     if (dynamicConfig == null || dynamicConfig.getCEntries().isEmpty()) {
-    //         LOGGER.debug("{} is empty in the system index, returning null", cType.toString());
-    //         return null;
-    //     }
-        
-    //     Map<String, Object> configData = new TreeMap<>();
-    //     for (Map.Entry<String, ?> entry : dynamicConfig.getCEntries().entrySet()) {
-    //         Object value = entry.getValue();
-    //         if (value instanceof Map) {
-    //             @SuppressWarnings("unchecked")
-    //             Map<String, Object> innerMap = (Map<String, Object>) value;
-    //             configData.put(entry.getKey(), innerMap);
-    //         } else {
-    //             configData.put(entry.getKey(), DefaultObjectMapper.objectMapper.convertValue(value, Map.class));
-    //         }
-    //     }
-    
-    //     return new SecurityConfigVersionDocument.SecurityConfig(Instant.now().toString(), configData);
-    // }    
-
     private SecurityConfigVersionDocument.SecurityConfig loadSecurityConfigFromSystemIndex(CType<?> cType) throws IOException {
         SecurityDynamicConfiguration<?> dynamicConfig = getConfiguration(cType);
         if (dynamicConfig == null || dynamicConfig.getCEntries().isEmpty()) {
@@ -592,17 +450,12 @@ public class ConfigurationRepository implements ClusterStateListener {
         }
     
         if (obj.getClass().getName().startsWith("java.")) {
-            // If it's a Java built-in type (String, Integer, Boolean, etc.), return as-is
             return obj;
         }
     
-        // Convert any other complex object into a map using Jackson
         return DefaultObjectMapper.objectMapper.convertValue(obj, Map.class);
     }
     
-    /**
-     * Extracts meaningful data from SecurityDynamicConfiguration<?>.
-     */
     private static Map<String, Object> extractConfigData(SecurityDynamicConfiguration<?> config) {
         Map<String, Object> extractedMap = new TreeMap<>();
         Map<String, ?> configEntries = config.getCEntries();
@@ -625,31 +478,15 @@ public class ConfigurationRepository implements ClusterStateListener {
                 LOGGER.warn("Skipping version update: newVersion is null");
                 return;
             }
-    
-            //Load the existing doc from .opendistro_security_config_versions
-            var getRequest = new org.opensearch.action.get.GetRequest(opendistroSecurityConfigVersionsIndex, "opendistro_security_config_versions");
-            var getResponse = client.get(getRequest).actionGet();
-    
-            SecurityConfigVersionDocument document;
-            if (getResponse.isExists()) {
-                document = DefaultObjectMapper.readValue(getResponse.getSourceAsString(), SecurityConfigVersionDocument.class);
-            } else {
-                document = new SecurityConfigVersionDocument();
-            }
+
+            SecurityConfigVersionDocument document = configVersionsLoader.loadFullDocument();
+            SecurityConfigVersionsLoader.sortVersionsById(document.getVersions());
     
             if (!document.getVersions().isEmpty()) {
                 SecurityConfigVersionDocument.Version latestVersion = document.getVersions().get(document.getVersions().size()-1);
-    
-                // String latestHash = computeSecurityConfigsHash(latestVersion);
-                // String newHash = computeSecurityConfigsHash(newVersion);
-    
-                // if (latestHash.equals(newHash)) {
-                //     LOGGER.info("No changes detected in security configuration. Skipping version update.");
-                //     return;
-                // }
 
-                Map<String, SecurityConfig> latestConfigMap = latestVersion.getSecurity_configs(); //convertVersionToMap(latestVersion);
-                Map<String, SecurityConfig> newConfigMap =  newVersion.getSecurity_configs(); //convertVersionToMap(newVersion);
+                Map<String, SecurityConfig> latestConfigMap = latestVersion.getSecurity_configs();
+                Map<String, SecurityConfig> newConfigMap =  newVersion.getSecurity_configs();
                 
                 if (!SecurityConfigDiffCalculator.hasSecurityConfigChanged(latestConfigMap, newConfigMap)) {
                     LOGGER.info("No changes detected in security configuration. Skipping version update.");
@@ -674,23 +511,6 @@ public class ConfigurationRepository implements ClusterStateListener {
         }
     }
 
-    // private Map<String, SecurityConfig> convertVersionToMap(SecurityConfigVersionDocument.Version version) {
-    //     Map<String, SecurityConfig> normalizedConfigs = new TreeMap<>();
-    //     for (Map.Entry<String, SecurityConfigVersionDocument.SecurityConfig> entry : version.getSecurity_configs().entrySet()) {
-    //         if (entry.getValue() != null) {
-    //             try {
-    //                 // Instead of converting to JSON, normalize the config map directly.
-    //                 Map<String, SecurityConfig> configMap = entry.getValue().toMap();
-    //                 //Map<String, Object> normalized = SecurityConfigDiffCalculator.normalize(configMap);
-    //                 normalizedConfigs.put(entry.getKey(), configMap);
-    //             } catch (Exception e) {
-    //                 LOGGER.error("Failed to normalize security config for version {}", version.getVersion_id(), e);
-    //             }
-    //         }
-    //     }
-    //     return normalizedConfigs;
-    // }    
-      
     private void setupAuditConfigurationIfAny(final boolean auditConfigDocPresent) {
         final Set<String> deprecatedAuditKeysInSettings = AuditConfig.getDeprecatedKeys(settings);
         if (!deprecatedAuditKeysInSettings.isEmpty()) {

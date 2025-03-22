@@ -52,34 +52,6 @@ public class SecurityConfigDiffCalculator {
         return true;
     }
  
-    /**
-     * Normalizes a configuration map:
-     * - Uses a TreeMap to sort keys
-     * - Recursively normalizes inner maps
-     * - Skips the "lastUpdated" key
-     *
-     * @param config the original configuration map
-     * @return a normalized, sorted map
-     */
-
-    // public static Map<String, Object> normalize(Map<String, SecurityConfig> config) {
-    //     Map<String, Object> normalizedMap = new TreeMap<>();
-    //     for (Map.Entry<String, Object> entry : config.entrySet()) {
-    //         if ("lastUpdated".equals(entry.getKey())) {
-    //             continue; // skip metadata
-    //         }
-    //         Object value = entry.getValue();
-    //         if (value instanceof Map) {
-    //             @SuppressWarnings("unchecked")
-    //             Map<String, Object> innerMap = (Map<String, Object>) value;
-    //             normalizedMap.put(entry.getKey(), normalize(innerMap));
-    //         } else {
-    //             normalizedMap.put(entry.getKey(), value);
-    //         }            
-    //     }
-    //     return normalizedMap;
-    // }
-     
     public static Map<String, Object> normalize(Map<String, SecurityConfig> config) {
         Map<String, Object> normalizedMap = new TreeMap<>();
     
@@ -91,7 +63,7 @@ public class SecurityConfigDiffCalculator {
                 Map<String, Object> normalizedConfigData = normalizeConfigData(value.getConfigData());
                 normalizedMap.put(entry.getKey(), normalizedConfigData);
             } else {
-                normalizedMap.put(entry.getKey(), null); // Handle null case safely
+                normalizedMap.put(entry.getKey(), null);
             }
         }
         return normalizedMap;
@@ -113,7 +85,6 @@ public class SecurityConfigDiffCalculator {
                 Map<String, Object> innerMap = (Map<String, Object>) value;
                 normalizedConfigData.put(entry.getKey(), normalizeConfigData(innerMap));
             } else {
-                // Handle non-map values directly
                 normalizedConfigData.put(entry.getKey(), value);
             }
         }
@@ -121,9 +92,6 @@ public class SecurityConfigDiffCalculator {
         return normalizedConfigData;
     }
     
-    /**
-     * Extracts meaningful data from SecurityDynamicConfiguration<?>.
-     */
     private static Map<String, Object> extractConfigData(SecurityDynamicConfiguration<?> config) {
         Map<String, Object> extractedMap = new TreeMap<>();
     
