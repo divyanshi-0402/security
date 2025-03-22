@@ -11,7 +11,6 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.security.configuration.SecurityConfigVersionDocument.SecurityConfig;
 import org.opensearch.security.securityconf.impl.SecurityDynamicConfiguration;
 import org.opensearch.security.DefaultObjectMapper;
-
  
 public class SecurityConfigDiffCalculator {
     private static final Logger LOGGER = LogManager.getLogger(SecurityConfigDiffCalculator.class);
@@ -89,5 +88,5 @@ public class SecurityConfigDiffCalculator {
         }
     
         return objectMapper.valueToTree(structuredConfigData);
-    } 
-}   
+    }    
+}
