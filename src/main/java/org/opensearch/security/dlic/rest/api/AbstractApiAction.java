@@ -339,14 +339,6 @@ public abstract class AbstractApiAction extends BaseRestHandler {
         return ValidationResult.success(securityConfiguration);
     }
 
-    // final void saveOrUpdateConfiguration(
-    //     final Client client,
-    //     final SecurityDynamicConfiguration<?> configuration,
-    //     final OnSucessActionListener<IndexResponse> onSucessActionListener
-    // ) {
-    //     saveAndUpdateConfigsAsync(securityApiDependencies, client, getConfigType(), configuration, onSucessActionListener);
-    // }
-
     final void saveOrUpdateConfiguration(
         final Client client,
         final SecurityDynamicConfiguration<?> configuration,
