@@ -45,6 +45,9 @@ public class SecurityConfigVersionsLoader {
 
                     SecurityConfigVersionDocument doc = DefaultObjectMapper.readValue(getResponse.getSourceAsString(), SecurityConfigVersionDocument.class);
                     List<SecurityConfigVersionDocument.Version> versions = doc.getVersions();
+                    
+                    doc.setSeqNo(getResponse.getSeqNo());
+                    doc.setPrimaryTerm(getResponse.getPrimaryTerm());
 
                     if (versions == null || versions.isEmpty()) {
                         listener.onResponse(null);
@@ -118,6 +121,10 @@ public class SecurityConfigVersionsLoader {
                         getResponse.getSourceAsString(),
                         SecurityConfigVersionDocument.class
                     );
+
+                    doc.setSeqNo(getResponse.getSeqNo());
+                    doc.setPrimaryTerm(getResponse.getPrimaryTerm());
+
                     listener.onResponse(doc);
                 } catch (IOException e) {
                     log.error("Failed to parse config versions doc", e);

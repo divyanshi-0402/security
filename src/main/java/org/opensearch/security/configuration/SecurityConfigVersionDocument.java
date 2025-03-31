@@ -11,6 +11,9 @@ import org.opensearch.security.securityconf.impl.SecurityDynamicConfiguration;
 // Represents the document structure for the .opendistro_security_config_versions system index.
 public class SecurityConfigVersionDocument {
 
+    private long seqNo = -1;
+    private long primaryTerm = -1;
+
     private final List<Version> versions;
 
     @JsonCreator
@@ -42,20 +45,40 @@ public class SecurityConfigVersionDocument {
         return docMap;
     }
 
+    public long getSeqNo() {
+        return seqNo;
+    }
+
+    public void setSeqNo(long seqNo) {
+        this.seqNo = seqNo;
+    }
+
+    public long getPrimaryTerm() {
+        return primaryTerm;
+    }
+
+    public void setPrimaryTerm(long primaryTerm) {
+        this.primaryTerm = primaryTerm;
+    }
+
     public static class Version {
         private final String version_id;
         private final String timestamp;
         private final Map<String, SecurityConfig> security_configs;
 
+        private final String modified_by;
+
         @JsonCreator
         public Version(
             @JsonProperty("version_id") String version_id,
             @JsonProperty("timestamp") String timestamp,
-            @JsonProperty("security_configs") Map<String, SecurityConfig> security_configs
+            @JsonProperty("security_configs") Map<String, SecurityConfig> security_configs,
+            @JsonProperty("modified_by") String modified_by
         ) {
             this.version_id = version_id;
             this.timestamp = timestamp;
             this.security_configs = (security_configs != null) ? security_configs : new HashMap<>();
+            this.modified_by = modified_by;
         }
 
         @JsonProperty("version_id")
@@ -73,6 +96,11 @@ public class SecurityConfigVersionDocument {
             return security_configs;
         }
 
+        @JsonProperty("modified_by")
+        public String getModified_by() {
+            return modified_by;
+        }
+
         public void addSecurityConfig(String type, SecurityConfig config) {
             security_configs.put(type, config);
         }
@@ -81,6 +109,7 @@ public class SecurityConfigVersionDocument {
             Map<String, Object> versionMap = new HashMap<>();
             versionMap.put("version_id", version_id);
             versionMap.put("timestamp", timestamp);
+            versionMap.put("modified_by", modified_by);
             Map<String, Object> scsMap = new HashMap<>();
             for (Map.Entry<String, SecurityConfig> entry : security_configs.entrySet()) {
                 scsMap.put(entry.getKey(), entry.getValue().toMap());

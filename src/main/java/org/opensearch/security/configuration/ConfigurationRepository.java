@@ -26,7 +26,10 @@
 
 package org.opensearch.security.configuration;
 
+import static org.opensearch.security.support.ConfigConstants.SECURITY_ALLOW_DEFAULT_INIT_USE_CLUSTER_STATE;
+
 import java.io.File;
+import java.io.IOException;
 import java.nio.file.Path;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
@@ -49,27 +52,16 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
-import java.io.IOException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
 
-import com.google.common.cache.Cache;
-import com.google.common.cache.CacheBuilder;
-import com.google.common.collect.ImmutableMap;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import com.google.common.hash.Hashing;
-import java.nio.charset.StandardCharsets;
-
-import org.opensearch.action.support.WriteRequest.RefreshPolicy;
-
 import org.opensearch.ExceptionsHelper;
 import org.opensearch.OpenSearchException;
 import org.opensearch.ResourceAlreadyExistsException;
 import org.opensearch.action.admin.cluster.health.ClusterHealthRequest;
 import org.opensearch.action.admin.cluster.health.ClusterHealthResponse;
 import org.opensearch.action.admin.indices.create.CreateIndexRequest;
+import org.opensearch.action.support.WriteRequest.RefreshPolicy;
 import org.opensearch.cluster.ClusterChangedEvent;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.ClusterStateListener;
@@ -82,15 +74,16 @@ import org.opensearch.common.Priority;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.util.concurrent.ThreadContext;
 import org.opensearch.common.util.concurrent.ThreadContext.StoredContext;
+import org.opensearch.common.xcontent.XContentType;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.Strings;
 import org.opensearch.core.rest.RestStatus;
 import org.opensearch.core.xcontent.MediaTypeRegistry;
-import org.opensearch.common.xcontent.XContentType;
 import org.opensearch.env.Environment;
 import org.opensearch.security.DefaultObjectMapper;
 import org.opensearch.security.auditlog.AuditLog;
 import org.opensearch.security.auditlog.config.AuditConfig;
+import org.opensearch.security.configuration.SecurityConfigVersionDocument.SecurityConfig;
 import org.opensearch.security.securityconf.DynamicConfigFactory;
 import org.opensearch.security.securityconf.impl.CType;
 import org.opensearch.security.securityconf.impl.SecurityDynamicConfiguration;
@@ -106,8 +99,11 @@ import org.opensearch.security.configuration.SecurityConfigVersionDocument;
 import org.opensearch.security.configuration.SecurityConfigVersionDocument.SecurityConfig;
 import org.opensearch.security.configuration.SecurityConfigDiffCalculator;
 import org.opensearch.security.configuration.SecurityConfigVersionsLoader;
+import org.opensearch.security.user.User;
 
-import static org.opensearch.security.support.ConfigConstants.SECURITY_ALLOW_DEFAULT_INIT_USE_CLUSTER_STATE;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
+import com.google.common.collect.ImmutableMap;
 
 public class ConfigurationRepository implements ClusterStateListener {
     private static final Logger LOGGER = LogManager.getLogger(ConfigurationRepository.class);
@@ -149,6 +145,7 @@ public class ConfigurationRepository implements ClusterStateListener {
         final AuditLog auditLog,
         final SecurityIndexHandler securityIndexHandler,
         final ConfigurationLoaderSecurity7 configurationLoaderSecurity7
+        final SecurityConfigVersionsLoader configVersionsLoader
     ) {
         this.securityIndex = securityIndex;
         this.opendistroSecurityConfigVersionsIndex = opendistroSecurityConfigVersionsIndex;
@@ -163,7 +160,7 @@ public class ConfigurationRepository implements ClusterStateListener {
         this.cl = configurationLoaderSecurity7;
         configCache = CacheBuilder.newBuilder().build();
         this.securityIndexHandler = securityIndexHandler;
-        this.configVersionsLoader = new SecurityConfigVersionsLoader(client, settings);
+        this.configVersionsLoader = configVersionsLoader;
     }
 
     private Path resolveConfigDir() {
@@ -317,7 +314,15 @@ public class ConfigurationRepository implements ClusterStateListener {
 
             // Building new version document and saving it to the new system index (.opendistro_security_config_versions)
             String nextVersionId = fetchNextVersionId();
-            SecurityConfigVersionDocument.Version version = buildVersionFromSecurityIndex(nextVersionId);
+            final ThreadContext threadContext = threadPool.getThreadContext();
+            User user = threadContext.getTransient(ConfigConstants.OPENDISTRO_SECURITY_USER);
+            String userinfo = (user != null) ? user.getName() : "unknown";
+
+            if ("v1".equals(nextVersionId) && user == null) {
+                userinfo = "system";
+            }
+            
+            SecurityConfigVersionDocument.Version version = buildVersionFromSecurityIndex(nextVersionId, userinfo);
             saveCurrentVersionToSystemIndex(version);
 
             setupAuditConfigurationIfAny(cl.isAuditConfigDocPresentInIndex());
@@ -329,7 +334,7 @@ public class ConfigurationRepository implements ClusterStateListener {
     }
 
     @SuppressWarnings("unchecked")
-    private String fetchNextVersionId() {
+    public String fetchNextVersionId() {
         try {
             SecurityConfigVersionDocument.Version latestVersion = configVersionsLoader.loadLatestVersion();
             if (latestVersion == null || latestVersion.getVersion_id() == null || !latestVersion.getVersion_id().startsWith("v")) {
@@ -343,9 +348,11 @@ public class ConfigurationRepository implements ClusterStateListener {
         }
     }    
     
-    private void saveCurrentVersionToSystemIndex(SecurityConfigVersionDocument.Version version) {
+    public void saveCurrentVersionToSystemIndex(SecurityConfigVersionDocument.Version version) {
         try {
             SecurityConfigVersionDocument document = configVersionsLoader.loadFullDocument();
+            long currentSeqNo = document.getSeqNo();
+            long currentPrimaryTerm = document.getPrimaryTerm();
             SecurityConfigVersionsLoader.sortVersionsById(document.getVersions());
             
             if (!document.getVersions().isEmpty()) {
@@ -369,9 +376,17 @@ public class ConfigurationRepository implements ClusterStateListener {
                 .source(json, XContentType.JSON)
                 .setRefreshPolicy(RefreshPolicy.IMMEDIATE);
             
-            client.index(indexRequest).actionGet();
+            if (currentSeqNo >= 0 && currentPrimaryTerm > 0) {
+                indexRequest.setIfSeqNo(currentSeqNo);
+                indexRequest.setIfPrimaryTerm(currentPrimaryTerm);
+            }
             
-            LOGGER.info("Successfully saved version {} to {}", version.getVersion_id(), opendistroSecurityConfigVersionsIndex);
+            try {
+                client.index(indexRequest).actionGet();
+                LOGGER.info("Successfully saved version {} to {}", version.getVersion_id(), opendistroSecurityConfigVersionsIndex);
+            } catch (org.opensearch.index.engine.VersionConflictEngineException conflictEx) {
+                LOGGER.warn("Concurrent update detected on {}", opendistroSecurityConfigVersionsIndex);
+            }
             
         } catch (Exception e) {
             LOGGER.error("Failed to save version to {}", opendistroSecurityConfigVersionsIndex, e);
@@ -379,10 +394,11 @@ public class ConfigurationRepository implements ClusterStateListener {
         }
     }        
     
-    public SecurityConfigVersionDocument.Version buildVersionFromSecurityIndex(String versionId) throws IOException {
+    public SecurityConfigVersionDocument.Version buildVersionFromSecurityIndex(String versionId, String modified_by) throws IOException {
         Instant now = Instant.now();
         String timestamp = now.toString();
-        SecurityConfigVersionDocument.Version version = new SecurityConfigVersionDocument.Version(versionId, timestamp, new HashMap<>());
+        
+        SecurityConfigVersionDocument.Version version = new SecurityConfigVersionDocument.Version(versionId, timestamp, new HashMap<>(), modified_by);
     
         for (CType<?> cType : CType.values()) {
             // Load configuration from the system index for this type
@@ -471,15 +487,20 @@ public class ConfigurationRepository implements ClusterStateListener {
     public void updateSecurityConfigVersionAfterUpdate() {
         try {
             String nextVersionId = fetchNextVersionId();
-    
+            final ThreadContext threadContext = threadPool.getThreadContext();
+            User user = threadContext.getTransient(ConfigConstants.OPENDISTRO_SECURITY_USER);
+            String userinfo = (user != null) ? user.getName() : "unknown";
+            
             //Build version from .opensearch_security
-            SecurityConfigVersionDocument.Version newVersion = buildVersionFromSecurityIndex(nextVersionId);
+            SecurityConfigVersionDocument.Version newVersion = buildVersionFromSecurityIndex(nextVersionId, userinfo);
             if (newVersion == null) {
                 LOGGER.warn("Skipping version update: newVersion is null");
                 return;
             }
 
             SecurityConfigVersionDocument document = configVersionsLoader.loadFullDocument();
+            long currentSeqNo = document.getSeqNo();
+            long currentPrimaryTerm = document.getPrimaryTerm();
             SecurityConfigVersionsLoader.sortVersionsById(document.getVersions());
     
             if (!document.getVersions().isEmpty()) {
@@ -503,9 +524,18 @@ public class ConfigurationRepository implements ClusterStateListener {
                 .id("opendistro_security_config_versions")
                 .source(json, XContentType.JSON)
                 .setRefreshPolicy(RefreshPolicy.IMMEDIATE);
+
+            if (currentSeqNo >= 0 && currentPrimaryTerm > 0) {
+                indexRequest.setIfSeqNo(currentSeqNo);
+                indexRequest.setIfPrimaryTerm(currentPrimaryTerm);
+            }
     
-            client.index(indexRequest).actionGet();
-            LOGGER.info("Successfully saved new security config version {}", newVersion.getVersion_id());
+            try {
+                client.index(indexRequest).actionGet();
+                LOGGER.info("Successfully saved new security config version {}", newVersion.getVersion_id());
+            } catch (org.opensearch.index.engine.VersionConflictEngineException conflictEx) {
+                LOGGER.warn("Concurrent update detected on {}", opendistroSecurityConfigVersionsIndex);
+            }
         } catch (Exception e) {
             LOGGER.error("Failed to update security config version doc", e);
         }
@@ -553,17 +583,21 @@ public class ConfigurationRepository implements ClusterStateListener {
             );
     
             final Map<String, Object> mappings = Map.of(
-                "properties", Map.of(
-                    "versions", Map.of(
-                        "type", "nested",
-                        "properties", Map.of(
-                            "version_id", Map.of("type", "keyword"),
-                            "timestamp", Map.of("type", "date"),
-                            "security_configs", Map.of("type", "object")
+            "properties", Map.of(
+                "versions", Map.of(
+                    "type", "object",
+                    "properties", Map.of(
+                        "version_id", Map.of( "type", "keyword"),
+                        "timestamp", Map.of("type", "date"),
+                        "modified_by", Map.of("type", "keyword"),
+                        "security_configs", Map.of(
+                            "type", "object",
+                            "enabled", false
                         )
                     )
                 )
-            );            
+            )
+        );           
             LOGGER.info("Index request for {}", opendistroSecurityConfigVersionsIndex);
             final CreateIndexRequest createIndexRequest = new CreateIndexRequest(opendistroSecurityConfigVersionsIndex)
                 .settings(indexSettings)
@@ -782,6 +816,7 @@ public class ConfigurationRepository implements ClusterStateListener {
             auditLog,
             new SecurityIndexHandler(securityIndex, settings, client),
             new ConfigurationLoaderSecurity7(client, threadPool, settings, clusterService)
+            new SecurityConfigVersionsLoader(client, settings)
         );
     }
 
