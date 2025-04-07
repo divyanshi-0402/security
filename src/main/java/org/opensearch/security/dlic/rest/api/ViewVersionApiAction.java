@@ -1,0 +1,242 @@
+package org.opensearch.security.dlic.rest.api;
+ 
+import org.opensearch.security.configuration.SecurityConfigVersionDocument;
+import org.opensearch.security.configuration.SecurityConfigVersionsLoader;
+import org.opensearch.security.dlic.rest.validation.ValidationResult;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.common.xcontent.XContentFactory;
+import org.opensearch.common.xcontent.json.JsonXContent;
+import org.opensearch.core.common.bytes.BytesReference;
+import org.opensearch.core.rest.RestStatus;
+import org.opensearch.core.xcontent.XContentBuilder;
+import org.opensearch.rest.RestRequest;
+import org.opensearch.threadpool.ThreadPool;
+import org.opensearch.security.securityconf.impl.CType;
+import org.opensearch.security.dlic.rest.validation.EndpointValidator;
+import org.opensearch.security.dlic.rest.validation.RequestContentValidator;
+ 
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+ 
+import static org.opensearch.security.dlic.rest.api.Responses.payload;
+import static org.opensearch.core.rest.RestStatus.OK;
+import static org.opensearch.core.rest.RestStatus.NOT_FOUND;
+import org.opensearch.rest.RestRequest.Method;
+import static org.opensearch.security.dlic.rest.support.Utils.addRoutesPrefix;
+import com.google.common.collect.ImmutableList;
+ 
+/**
+ * REST endpoint: 
+ *   GET _opendistro/_security/api/view_version
+ *   GET _opendistro/_security/api/view_version/{versionId}
+ */
+public class ViewVersionApiAction extends AbstractApiAction {
+ 
+    private static final Logger LOGGER = LogManager.getLogger(ViewVersionApiAction.class);
+ 
+ 
+    private static final List<Route> routes = addRoutesPrefix(
+        ImmutableList.of(
+            new Route(Method.GET, "/view_version"),
+            new Route(Method.GET, "/view_version/{versionID}")
+        )
+    );
+ 
+    private final SecurityConfigVersionsLoader versionsLoader;
+ 
+    public ViewVersionApiAction(
+        final ClusterService clusterService,
+        final ThreadPool threadPool,
+        final SecurityApiDependencies securityApiDependencies,
+        final SecurityConfigVersionsLoader versionsLoader
+    ) {
+        super(Endpoint.VIEW_VERSION, clusterService, threadPool, securityApiDependencies);
+        this.versionsLoader = versionsLoader;
+ 
+        this.requestHandlersBuilder
+            .add(RestRequest.Method.POST, RequestHandler.methodNotImplementedHandler)
+            .add(RestRequest.Method.PATCH, RequestHandler.methodNotImplementedHandler)
+            .add(RestRequest.Method.PUT, RequestHandler.methodNotImplementedHandler)
+            .add(RestRequest.Method.DELETE, RequestHandler.methodNotImplementedHandler)
+            
+            .onGetRequest((restRequest) -> {
+                String versionParam = restRequest.param("versionID");
+                return handleGetRequest(versionParam);
+            });
+    }
+ 
+    @Override
+    public List<Route> routes() {
+        return routes;
+    }
+ 
+    @Override
+    protected CType<?> getConfigType() {
+        return null;
+    }
+ 
+    private ValidationResult<SecurityConfiguration> handleGetRequest(String versionParam) throws IOException {
+        LOGGER.info("Called handleGetRequest with versionParam={}", versionParam);
+        try {
+            if (versionParam == null) {
+                return viewAllVersions();
+            } else {
+                return viewSpecificVersion(versionParam);
+            }
+        } catch (Exception e) {
+            return ValidationResult.error(RestStatus.INTERNAL_SERVER_ERROR, payload(RestStatus.INTERNAL_SERVER_ERROR, e.getMessage()));
+        }
+    }
+
+    private ValidationResult<SecurityConfiguration> viewAllVersions() throws IOException {
+        SecurityConfigVersionDocument doc = versionsLoader.loadFullDocument();
+        SecurityConfigVersionsLoader.sortVersionsById(doc.getVersions());
+
+        return ValidationResult.error(OK, (builder, params) -> {
+            XContentBuilder inner = buildVersionsJsonBuilder(doc.getVersions());
+            builder.copyCurrentStructure(JsonXContent.jsonXContent
+                .createParser(null, null, BytesReference.bytes(inner).streamInput()));
+            return builder;
+        });
+    }     
+
+    private ValidationResult<SecurityConfiguration> viewSpecificVersion(String versionId) throws IOException {
+        SecurityConfigVersionDocument doc = versionsLoader.loadFullDocument();
+        SecurityConfigVersionsLoader.sortVersionsById(doc.getVersions());
+    
+        var maybeVer = doc.getVersions().stream()
+            .filter(v -> versionId.equals(v.getVersion_id()))
+            .findFirst();
+    
+        if (maybeVer.isEmpty()) {
+            return ValidationResult.error(NOT_FOUND, payload(NOT_FOUND, "Version " + versionId + " not found"));
+        }
+    
+        return ValidationResult.error(OK, (builder, params) -> {
+            XContentBuilder inner = buildVersionsJsonBuilder(List.of(maybeVer.get()));
+            builder.copyCurrentStructure(JsonXContent.jsonXContent
+                .createParser(null, null, BytesReference.bytes(inner).streamInput()));
+            return builder;
+        });
+    }     
+ 
+    /**
+     * Build the JSON structure:
+     */  
+
+    private XContentBuilder buildVersionsJsonBuilder(List<SecurityConfigVersionDocument.Version> versions) throws IOException {
+        XContentBuilder builder = XContentFactory.jsonBuilder().prettyPrint();
+        builder.startObject();
+        builder.startArray("versions");
+        for (SecurityConfigVersionDocument.Version ver : versions) {
+            builder.startObject();
+            builder.field("version_id", ver.getVersion_id());
+            builder.field("timestamp", ver.getTimestamp());
+            builder.field("modified_by", ver.getModified_by());
+            builder.field("security_configs");
+            builder.map(toPlainMap(ver.getSecurity_configs()));
+            builder.endObject();
+        }
+        builder.endArray();
+        builder.endObject();
+        return builder;
+    }
+    
+    private static Map<String, Object> toPlainMap(Map<String, SecurityConfigVersionDocument.SecurityConfig> original) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        if (original == null) {
+            return result;
+        }
+        for (var entry : original.entrySet()) {
+            String key = entry.getKey();
+            SecurityConfigVersionDocument.SecurityConfig sc = entry.getValue();
+            if (sc == null) {
+                result.put(key, null);
+                continue;
+            }
+            Map<String, Object> scMap = new LinkedHashMap<>();
+            scMap.put("lastUpdated", sc.getLastUpdated());
+    
+            Map<String, Object> configData = safeConvert(sc.getConfigData()); 
+            scMap.put("configData", configData);
+    
+            result.put(key, scMap);
+        }
+        return result;
+    }
+    
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> safeConvert(Map<?, ?> raw) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        if (raw == null) return result;
+        for (var entry : raw.entrySet()) {
+            String key = String.valueOf(entry.getKey());
+            Object val = entry.getValue();
+            if (val instanceof Map) {
+                result.put(key, safeConvert((Map<?,?>) val));
+            } 
+            else if (val instanceof List) {
+                result.put(key, safeListConvert((List<?>) val));
+            } else {
+                result.put(key, val);
+            }
+        }
+        return result;
+    }
+    
+    private static List<Object> safeListConvert(List<?> rawList) {
+        List<Object> newList = new ArrayList<>();
+        for (Object item : rawList) {
+            if (item instanceof Map) {
+                newList.add(safeConvert((Map<?,?>) item));
+            } else if (item instanceof List) {
+                newList.add(safeListConvert((List<?>) item));
+            } else {
+                newList.add(item);
+            }
+        }
+        return newList;
+    }
+ 
+    @Override
+    protected EndpointValidator createEndpointValidator() {
+        return new EndpointValidator() {
+    
+            @Override
+            public Endpoint endpoint() {
+                return endpoint;
+            }
+    
+            @Override
+            public RestApiAdminPrivilegesEvaluator restApiAdminPrivilegesEvaluator() {
+                return securityApiDependencies.restApiAdminPrivilegesEvaluator();
+            }
+    
+            @Override
+            public ValidationResult<SecurityConfiguration> onConfigLoad(SecurityConfiguration securityConfiguration) {
+                // Allow GET access for viewing versions
+                return ValidationResult.success(securityConfiguration);
+            }
+    
+            @Override
+            public ValidationResult<SecurityConfiguration> onConfigDelete(SecurityConfiguration securityConfiguration) {
+                return ValidationResult.error(RestStatus.FORBIDDEN, Responses.forbiddenMessage("Delete not supported for version view"));
+            }
+    
+            @Override
+            public ValidationResult<SecurityConfiguration> onConfigChange(SecurityConfiguration securityConfiguration) {
+                return ValidationResult.error(RestStatus.FORBIDDEN, Responses.forbiddenMessage("Change not supported for version view"));
+            }
+    
+            @Override
+            public RequestContentValidator createRequestContentValidator(Object... params) {
+                return RequestContentValidator.NOOP_VALIDATOR;
+            }
+        };
+    }
+}

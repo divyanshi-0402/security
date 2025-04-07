@@ -652,6 +652,7 @@ public abstract class AbstractApiAction extends BaseRestHandler {
      */
     protected void consumeParameters(final RestRequest request) {
         request.param("name");
+        request.param("versionID");
     }
 
     @Override

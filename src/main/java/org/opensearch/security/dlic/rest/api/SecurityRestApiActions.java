@@ -22,6 +22,7 @@ import org.opensearch.rest.RestHandler;
 import org.opensearch.security.auditlog.AuditLog;
 import org.opensearch.security.configuration.AdminDNs;
 import org.opensearch.security.configuration.ConfigurationRepository;
+import org.opensearch.security.configuration.SecurityConfigVersionsLoader;
 import org.opensearch.security.hasher.PasswordHasher;
 import org.opensearch.security.privileges.PrivilegesEvaluator;
 import org.opensearch.security.ssl.SslSettingsManager;
@@ -102,7 +103,13 @@ public class SecurityRestApiActions {
                 certificatesReloadEnabled,
                 securityApiDependencies
             ),
-            new CertificatesApiAction(clusterService, threadPool, securityApiDependencies)
+            new CertificatesApiAction(clusterService, threadPool, securityApiDependencies),
+            new ViewVersionApiAction(
+                clusterService,
+                threadPool,
+                securityApiDependencies,
+                new SecurityConfigVersionsLoader(client, settings)
+            )
         );
     }
 
