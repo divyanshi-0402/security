@@ -30,5 +30,6 @@ public enum Endpoint {
     ALLOWLIST,
     NODESDN,
     SSL,
-    VIEW_VERSION;
+    VIEW_VERSION,
+    ROLLBACK_VERSION;
 }
