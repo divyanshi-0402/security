@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
+ 
 /*
  * SPDX-License-Identifier: Apache-2.0
  *
@@ -23,7 +23,7 @@
  * Modifications Copyright OpenSearch Contributors. See
  * GitHub history for details.
  */
-
+ 
 package org.opensearch.security.configuration;
 
 import static org.opensearch.security.support.ConfigConstants.SECURITY_ALLOW_DEFAULT_INIT_USE_CLUSTER_STATE;
@@ -316,682 +316,601 @@ public class ConfigurationRepository implements ClusterStateListener {
             String nextVersionId = fetchNextVersionId();
             final ThreadContext threadContext = threadPool.getThreadContext();
             User user = threadContext.getTransient(ConfigConstants.OPENDISTRO_SECURITY_USER);
-            String userinfo = (user != null) ? user.getName() : "unknown";
 
-            if ("v1".equals(nextVersionId) && user == null) {
+            String userinfo;
+            if (user != null) {
+                userinfo = user.getName();
+            } else if ("v1".equals(nextVersionId)) {
                 userinfo = "system";
+            } else {
+                userinfo = "unknown";
             }
-            
-            SecurityConfigVersionDocument.Version version = buildVersionFromSecurityIndex(nextVersionId, userinfo);
-            saveCurrentVersionToSystemIndex(version);
-
-            setupAuditConfigurationIfAny(cl.isAuditConfigDocPresentInIndex());
-            LOGGER.info("Node '{}' initialized", clusterService.localNode().getName());
-
-        } catch (Exception e) {
-            LOGGER.error("Unexpected exception while initializing node " + e, e);
+             
+             SecurityConfigVersionDocument.Version<?> version = buildVersionFromSecurityIndex(nextVersionId, userinfo);
+             saveCurrentVersionToSystemIndex(version);
+  
+             setupAuditConfigurationIfAny(cl.isAuditConfigDocPresentInIndex());
+             LOGGER.info("Node '{}' initialized", clusterService.localNode().getName());
+  
+         } catch (Exception e) {
+             LOGGER.error("Unexpected exception while initializing node " + e, e);
+         }
+     }
+  
+     @SuppressWarnings("unchecked")
+     public String fetchNextVersionId() {
+         try {
+             SecurityConfigVersionDocument.Version<?> latestVersion = configVersionsLoader.loadLatestVersion();
+             if (latestVersion == null || latestVersion.getVersion_id() == null || !latestVersion.getVersion_id().startsWith("v")) {
+                 return "v1";
+             }
+             int currentVersionNumber = Integer.parseInt(latestVersion.getVersion_id().substring(1));
+             return "v" + (currentVersionNumber + 1);
+         } catch (Exception e) {
+             LOGGER.error("Failed to fetch latest version from {}", SecurityConfigVersionsIndex, e);
+             throw new RuntimeException("Failed to fetch next version id", e);
+         }
+     }
+     
+     private void writeSecurityConfigVersion(SecurityConfigVersionDocument document, long currentSeqNo, long currentPrimaryTerm) throws IOException {
+        Map<String, Object> updatedDocMap = document.toMap();
+        String json = DefaultObjectMapper.objectMapper.writeValueAsString(updatedDocMap);
+    
+        var indexRequest = new org.opensearch.action.index.IndexRequest(SecurityConfigVersionsIndex)
+            .id("opendistro_security_config_versions")
+            .source(json, XContentType.JSON)
+            .setRefreshPolicy(RefreshPolicy.IMMEDIATE);
+    
+        if (currentSeqNo >= 0 && currentPrimaryTerm > 0) {
+            indexRequest.setIfSeqNo(currentSeqNo);
+            indexRequest.setIfPrimaryTerm(currentPrimaryTerm);
         }
+    
+        client.index(indexRequest).actionGet();
     }
-
-    @SuppressWarnings("unchecked")
-    public String fetchNextVersionId() {
-        try {
-            SecurityConfigVersionDocument.Version latestVersion = configVersionsLoader.loadLatestVersion();
-            if (latestVersion == null || latestVersion.getVersion_id() == null || !latestVersion.getVersion_id().startsWith("v")) {
-                return "v1";
+    
+    private boolean shouldSkipVersionUpdate(SecurityConfigVersionDocument document, SecurityConfigVersionDocument.Version<?> newVersion) {
+        SecurityConfigVersionsLoader.sortVersionsById(document.getVersions());
+    
+        if (!document.getVersions().isEmpty()) {
+            SecurityConfigVersionDocument.Version<?> latestVersion = document.getVersions().get(document.getVersions().size() - 1);
+            Map<String, SecurityConfig<?>> latestConfigMap = latestVersion.getSecurity_configs();
+            Map<String, SecurityConfig<?>> newConfigMap = newVersion.getSecurity_configs();
+    
+            if (!SecurityConfigDiffCalculator.hasSecurityConfigChanged(latestConfigMap, newConfigMap)) {
+                LOGGER.info("No changes detected in security configuration. Skipping version update.");
+                return true;
             }
-            int currentVersionNumber = Integer.parseInt(latestVersion.getVersion_id().substring(1));
-            return "v" + (currentVersionNumber + 1);
-        } catch (Exception e) {
-            LOGGER.error("Failed to fetch latest version from {}", opendistroSecurityConfigVersionsIndex, e);
-            throw new RuntimeException("Failed to fetch next version id", e);
         }
+    
+        return false;
     }    
-    
-    public void saveCurrentVersionToSystemIndex(SecurityConfigVersionDocument.Version version) {
-        try {
-            SecurityConfigVersionDocument document = configVersionsLoader.loadFullDocument();
-            long currentSeqNo = document.getSeqNo();
-            long currentPrimaryTerm = document.getPrimaryTerm();
-            SecurityConfigVersionsLoader.sortVersionsById(document.getVersions());
-            
-            if (!document.getVersions().isEmpty()) {
-                SecurityConfigVersionDocument.Version latestVersion = document.getVersions().get(document.getVersions().size() - 1);
-                Map<String, SecurityConfig> latestConfigMap = latestVersion.getSecurity_configs();
-                Map<String, SecurityConfig> newConfigMap =  version.getSecurity_configs();
-                
-                if (!SecurityConfigDiffCalculator.hasSecurityConfigChanged(latestConfigMap, newConfigMap)) {
-                    LOGGER.info("No changes detected in security configuration. Skipping version update.");
-                    return;
-                }
+     
+     public <T> void saveCurrentVersionToSystemIndex(SecurityConfigVersionDocument.Version<T> version) {
+         try {
+             SecurityConfigVersionDocument document = configVersionsLoader.loadFullDocument();
+            if (shouldSkipVersionUpdate(document, version)) {
+                return;
             }
-            
-            // Otherwise, add the new version and update the document
-            document.addVersion(version);
-            Map<String, Object> updatedDocMap = document.toMap();
-            String json = DefaultObjectMapper.objectMapper.writeValueAsString(updatedDocMap);
-            
-            var indexRequest = new org.opensearch.action.index.IndexRequest(opendistroSecurityConfigVersionsIndex)
-                .id("opendistro_security_config_versions")
-                .source(json, XContentType.JSON)
-                .setRefreshPolicy(RefreshPolicy.IMMEDIATE);
-            
-            if (currentSeqNo >= 0 && currentPrimaryTerm > 0) {
-                indexRequest.setIfSeqNo(currentSeqNo);
-                indexRequest.setIfPrimaryTerm(currentPrimaryTerm);
-            }
-            
-            try {
-                client.index(indexRequest).actionGet();
-                LOGGER.info("Successfully saved version {} to {}", version.getVersion_id(), opendistroSecurityConfigVersionsIndex);
+             // Otherwise, add the new version and update the document
+             document.addVersion(version);
+             writeSecurityConfigVersion(document, document.getSeqNo(), document.getPrimaryTerm());
+
+            LOGGER.info("Successfully saved version {} to {}", version.getVersion_id(), SecurityConfigVersionsIndex);
+
             } catch (org.opensearch.index.engine.VersionConflictEngineException conflictEx) {
-                LOGGER.warn("Concurrent update detected on {}", opendistroSecurityConfigVersionsIndex);
-            }
-            
-        } catch (Exception e) {
-            LOGGER.error("Failed to save version to {}", opendistroSecurityConfigVersionsIndex, e);
-            throw ExceptionsHelper.convertToOpenSearchException(e);
-        }
-    }        
-    
-    public SecurityConfigVersionDocument.Version buildVersionFromSecurityIndex(String versionId, String modified_by) throws IOException {
+                 LOGGER.warn("Concurrent update detected on {}", SecurityConfigVersionsIndex);
+             }
+         catch (Exception e) {
+             LOGGER.error("Failed to save version to {}", SecurityConfigVersionsIndex, e);
+             throw ExceptionsHelper.convertToOpenSearchException(e);
+         }
+     }        
+     
+     @SuppressWarnings({ "rawtypes", "unchecked" })
+    public SecurityConfigVersionDocument.Version<?> buildVersionFromSecurityIndex(String versionId, String modified_by) throws IOException {
         Instant now = Instant.now();
         String timestamp = now.toString();
         
-        SecurityConfigVersionDocument.Version version = new SecurityConfigVersionDocument.Version(versionId, timestamp, new HashMap<>(), modified_by);
-    
+        SecurityConfigVersionDocument.Version<?> version = new SecurityConfigVersionDocument.Version<>(versionId, timestamp, new HashMap<>(), modified_by);
+        
+        ConfigurationMap allConfigs = getConfigurationsFromIndex(CType.values(), false);
+        
         for (CType<?> cType : CType.values()) {
-            // Load configuration from the system index for this type
-            SecurityConfigVersionDocument.SecurityConfig config = loadSecurityConfigFromSystemIndex(cType);
-            // If the config is missing or its data is null, substitute an empty map.
-            if (config == null || config.getConfigData() == null) {
-                config = new SecurityConfigVersionDocument.SecurityConfig(timestamp, new HashMap<>());
+            SecurityDynamicConfiguration<?> dynamicConfig = allConfigs.get(cType);
+            
+            if (dynamicConfig == null || dynamicConfig.getCEntries() == null || dynamicConfig.getCEntries().isEmpty()) {
+                version.addSecurityConfig(cType.toLCString(), new SecurityConfigVersionDocument.SecurityConfig<>(timestamp, new HashMap<>()));
+            } else {
+                version.addSecurityConfig(cType.toLCString(), 
+                    new SecurityConfigVersionDocument.SecurityConfig(timestamp, new TreeMap<>(dynamicConfig.getCEntries())));
             }
-            version.addSecurityConfig(cType.toLCString(), config);
-        }
-        return version;
-    }
-    
-    private SecurityConfigVersionDocument.SecurityConfig loadSecurityConfigFromSystemIndex(CType<?> cType) throws IOException {
-        SecurityDynamicConfiguration<?> dynamicConfig = getConfiguration(cType);
-        if (dynamicConfig == null || dynamicConfig.getCEntries().isEmpty()) {
-            LOGGER.debug("{} is empty in the system index, returning null", cType.toString());
-            return null;
         }
         
-        Map<String, Object> configData = new TreeMap<>();
-        for (Map.Entry<String, ?> entry : dynamicConfig.getCEntries().entrySet()) {
-            configData.put(entry.getKey(), convertObjectToMap(entry.getValue()));
-        }
-    
-        return new SecurityConfigVersionDocument.SecurityConfig(Instant.now().toString(), configData);
-    }
-    
-    private static Object convertObjectToMap(Object obj) {
-        if (obj == null) {
-            return null;
-        }
-    
-        if (obj instanceof Map) {
-            // Recursively convert all map values
-            Map<?, ?> originalMap = (Map<?, ?>) obj;
-            Map<String, Object> convertedMap = new TreeMap<>();
-            for (Map.Entry<?, ?> entry : originalMap.entrySet()) {
-                convertedMap.put(String.valueOf(entry.getKey()), convertObjectToMap(entry.getValue()));
-            }
-            return convertedMap;
-        }
-    
-        if (obj instanceof List) {
-            // Recursively convert all list elements
-            List<?> originalList = (List<?>) obj;
-            List<Object> convertedList = new ArrayList<>();
-            for (Object item : originalList) {
-                convertedList.add(convertObjectToMap(item));
-            }
-            return convertedList;
-        }
-    
-        if (obj instanceof Set) {
-            // Convert Set to List and apply recursive conversion
-            List<Object> convertedList = ((Set<?>) obj).stream()
-                    .map(ConfigurationRepository::convertObjectToMap)
-                    .collect(Collectors.toList());
-            return convertedList;
-        }
-    
-        if (obj instanceof SecurityDynamicConfiguration<?>) {
-            // Extract data from SecurityDynamicConfiguration
-            return extractConfigData((SecurityDynamicConfiguration<?>) obj);
-        }
-    
-        if (obj.getClass().getName().startsWith("java.")) {
-            return obj;
-        }
-    
-        return DefaultObjectMapper.objectMapper.convertValue(obj, Map.class);
-    }
-    
-    private static Map<String, Object> extractConfigData(SecurityDynamicConfiguration<?> config) {
-        Map<String, Object> extractedMap = new TreeMap<>();
-        Map<String, ?> configEntries = config.getCEntries();
-    
-        if (configEntries != null) {
-            for (Map.Entry<String, ?> entry : configEntries.entrySet()) {
-                extractedMap.put(entry.getKey(), convertObjectToMap(entry.getValue()));
-            }
-        }
-        return extractedMap;
-    }      
-    
-    public void updateSecurityConfigVersionAfterUpdate() {
-        try {
-            String nextVersionId = fetchNextVersionId();
-            final ThreadContext threadContext = threadPool.getThreadContext();
-            User user = threadContext.getTransient(ConfigConstants.OPENDISTRO_SECURITY_USER);
-            String userinfo = (user != null) ? user.getName() : "unknown";
-            
-            //Build version from .opensearch_security
-            SecurityConfigVersionDocument.Version newVersion = buildVersionFromSecurityIndex(nextVersionId, userinfo);
-            if (newVersion == null) {
-                LOGGER.warn("Skipping version update: newVersion is null");
+        return version;
+    }   
+     
+     public void updateSecurityConfigVersionAfterUpdate() {
+         try {
+             String nextVersionId = fetchNextVersionId();
+             final ThreadContext threadContext = threadPool.getThreadContext();
+             User user = threadContext.getTransient(ConfigConstants.OPENDISTRO_SECURITY_USER);
+             String userinfo = (user != null) ? user.getName() : "unknown";
+             
+             //Build version from .opensearch_security
+             SecurityConfigVersionDocument.Version<?> newVersion = buildVersionFromSecurityIndex(nextVersionId, userinfo);
+             if (newVersion == null) {
+                 LOGGER.warn("Skipping version update: newVersion is null");
+                 return;
+             }
+  
+             SecurityConfigVersionDocument document = configVersionsLoader.loadFullDocument();
+
+            if (shouldSkipVersionUpdate(document, newVersion)) {
                 return;
             }
-
-            SecurityConfigVersionDocument document = configVersionsLoader.loadFullDocument();
-            long currentSeqNo = document.getSeqNo();
-            long currentPrimaryTerm = document.getPrimaryTerm();
-            SecurityConfigVersionsLoader.sortVersionsById(document.getVersions());
-    
-            if (!document.getVersions().isEmpty()) {
-                SecurityConfigVersionDocument.Version latestVersion = document.getVersions().get(document.getVersions().size()-1);
-
-                Map<String, SecurityConfig> latestConfigMap = latestVersion.getSecurity_configs();
-                Map<String, SecurityConfig> newConfigMap =  newVersion.getSecurity_configs();
-                
-                if (!SecurityConfigDiffCalculator.hasSecurityConfigChanged(latestConfigMap, newConfigMap)) {
-                    LOGGER.info("No changes detected in security configuration. Skipping version update.");
-                    return;
-                }                
-            }
-    
-            document.addVersion(newVersion);
-    
-            Map<String, Object> updatedDocMap = document.toMap();
-            String json = DefaultObjectMapper.objectMapper.writeValueAsString(updatedDocMap);
-    
-            var indexRequest = new org.opensearch.action.index.IndexRequest(opendistroSecurityConfigVersionsIndex)
-                .id("opendistro_security_config_versions")
-                .source(json, XContentType.JSON)
-                .setRefreshPolicy(RefreshPolicy.IMMEDIATE);
-
-            if (currentSeqNo >= 0 && currentPrimaryTerm > 0) {
-                indexRequest.setIfSeqNo(currentSeqNo);
-                indexRequest.setIfPrimaryTerm(currentPrimaryTerm);
-            }
-    
-            try {
-                client.index(indexRequest).actionGet();
-                LOGGER.info("Successfully saved new security config version {}", newVersion.getVersion_id());
-            } catch (org.opensearch.index.engine.VersionConflictEngineException conflictEx) {
-                LOGGER.warn("Concurrent update detected on {}", opendistroSecurityConfigVersionsIndex);
-            }
-        } catch (Exception e) {
-            LOGGER.error("Failed to update security config version doc", e);
-        }
-    }
-
-    private void setupAuditConfigurationIfAny(final boolean auditConfigDocPresent) {
-        final Set<String> deprecatedAuditKeysInSettings = AuditConfig.getDeprecatedKeys(settings);
-        if (!deprecatedAuditKeysInSettings.isEmpty()) {
-            LOGGER.warn(
-                "Following keys {} are deprecated in opensearch settings. They will be removed in plugin v4.0.0.0",
-                deprecatedAuditKeysInSettings
-            );
-        }
-        if (auditConfigDocPresent) {
-            if (!deprecatedAuditKeysInSettings.isEmpty()) {
-                LOGGER.warn("Audit configuration settings found in both index and opensearch settings (deprecated)");
-            }
-            LOGGER.info("Hot-reloading of audit configuration is enabled");
-        } else {
-            LOGGER.info(
-                "Hot-reloading of audit configuration is disabled. Using configuration with defaults from opensearch settings.  Populate the configuration in index using audit.yml or securityadmin to enable it."
-            );
-            auditLog.setConfig(AuditConfig.from(settings));
-        }
-    }
-
-    private boolean createSecurityIndexIfAbsent() {
-        try {
-            final Map<String, Object> indexSettings = ImmutableMap.of("index.number_of_shards", 1, "index.auto_expand_replicas", "0-all");
-            final CreateIndexRequest createIndexRequest = new CreateIndexRequest(securityIndex).settings(indexSettings);
-            final boolean ok = client.admin().indices().create(createIndexRequest).actionGet().isAcknowledged();
-            LOGGER.info("Index {} created?: {}", securityIndex, ok);
-            return ok;
-        } catch (ResourceAlreadyExistsException resourceAlreadyExistsException) {
-            LOGGER.info("Index {} already exists", securityIndex);
-            return false;
-        }
-    }
-
-    private boolean createOpendistroSecurityConfigVersionsIndexIfAbsent() {
-        try {
-            final Map<String, Object> indexSettings = ImmutableMap.of(
-                "index.number_of_shards", 1,
-                "index.auto_expand_replicas", "0-all"
-            );
-    
-            final Map<String, Object> mappings = Map.of(
-            "properties", Map.of(
-                "versions", Map.of(
-                    "type", "object",
-                    "properties", Map.of(
-                        "version_id", Map.of( "type", "keyword"),
-                        "timestamp", Map.of("type", "date"),
-                        "modified_by", Map.of("type", "keyword"),
-                        "security_configs", Map.of(
-                            "type", "object",
-                            "enabled", false
-                        )
-                    )
-                )
-            )
-        );           
-            LOGGER.info("Index request for {}", opendistroSecurityConfigVersionsIndex);
-            final CreateIndexRequest createIndexRequest = new CreateIndexRequest(opendistroSecurityConfigVersionsIndex)
-                .settings(indexSettings)
-                .mapping(mappings);
-    
-            final boolean ok = client.admin().indices().create(createIndexRequest).actionGet().isAcknowledged();
-            LOGGER.info("Index {} created?: {}", opendistroSecurityConfigVersionsIndex, ok);
-            return ok;
-        } catch (ResourceAlreadyExistsException resourceAlreadyExistsException) {
-            LOGGER.info("Index {} already exists", opendistroSecurityConfigVersionsIndex);
-            return false;
-        } catch (Exception e) {
-            LOGGER.error("Failed to create index {}", opendistroSecurityConfigVersionsIndex, e);
-            throw e;
-        }
-    }
-    
-
-    private void waitForSecurityIndexToBeAtLeastYellow() {
-        LOGGER.info("Node started, try to initialize it. Wait for at least yellow cluster state....");
-        ClusterHealthResponse response = null;
-        try {
-            response = client.admin()
-                .cluster()
-                .health(new ClusterHealthRequest(securityIndex).waitForActiveShards(1).waitForYellowStatus())
-                .actionGet();
-        } catch (Exception e) {
-            LOGGER.debug("Caught a {} but we just try again ...", e.toString());
-        }
-
-        while (response == null || response.isTimedOut() || response.getStatus() == ClusterHealthStatus.RED) {
-            LOGGER.debug(
-                "index '{}' not healthy yet, we try again ... (Reason: {})",
-                securityIndex,
-                response == null ? "no response" : (response.isTimedOut() ? "timeout" : "other, maybe red cluster")
-            );
-            try {
-                TimeUnit.MILLISECONDS.sleep(500);
-            } catch (InterruptedException e) {
-                // ignore
-                Thread.currentThread().interrupt();
-            }
-            try {
-                response = client.admin().cluster().health(new ClusterHealthRequest(securityIndex).waitForYellowStatus()).actionGet();
-            } catch (Exception e) {
-                LOGGER.debug("Caught again a {} but we just try again ...", e.toString());
-            }
-        }
-    }
-
-    private void waitForOpendistroSecurityConfigVersionsIndexToBeAtLeastYellow() {
-        LOGGER.info("Node started, try to initialize it. Wait for at least yellow cluster state....");
-        ClusterHealthResponse response = null;
-        try {
-            response = client.admin()
-                .cluster()
-                .health(new ClusterHealthRequest(opendistroSecurityConfigVersionsIndex).waitForActiveShards(1).waitForYellowStatus())
-                .actionGet();
-        } catch (Exception e) {
-            LOGGER.debug("Caught a {} but we just try again ...", e.toString());
-        }
-
-        while (response == null || response.isTimedOut() || response.getStatus() == ClusterHealthStatus.RED) {
-            LOGGER.debug(
-                "index '{}' not healthy yet, we try again ... (Reason: {})",
-                opendistroSecurityConfigVersionsIndex,
-                response == null ? "no response" : (response.isTimedOut() ? "timeout" : "other, maybe red cluster")
-            );
-            try {
-                TimeUnit.MILLISECONDS.sleep(500);
-            } catch (InterruptedException e) {
-                // ignore
-                Thread.currentThread().interrupt();
-            }
-            try {
-                response = client.admin().cluster().health(new ClusterHealthRequest(opendistroSecurityConfigVersionsIndex).waitForYellowStatus()).actionGet();
-            } catch (Exception e) {
-                LOGGER.debug("Caught again a {} but we just try again ...", e.toString());
-            }
-        }
-    }
-
-    void initSecurityIndex(final ClusterChangedEvent event) {
-        if (!event.state().metadata().hasIndex(securityIndex)) {
-            securityIndexHandler.createIndex(
-                ActionListener.wrap(r -> uploadDefaultConfiguration0(), e -> LOGGER.error("Couldn't create index {}", securityIndex, e))
-            );
-        } else {
-            // in case index was created and cluster state has not been changed (e.g. restart of the node or something)
-            // just upload default configuration
-            uploadDefaultConfiguration0();
-        }
-    }
-
-    private void uploadDefaultConfiguration0() {
-        securityIndexHandler.uploadDefaultConfiguration(
-            resolveConfigDir(),
-            ActionListener.wrap(
-                configuration -> clusterService.submitStateUpdateTask(
-                    "init-security-configuration",
-                    new ClusterStateUpdateTask(Priority.IMMEDIATE) {
-                        @Override
-                        public ClusterState execute(ClusterState clusterState) throws Exception {
-                            return ClusterState.builder(clusterState)
-                                .putCustom(SecurityMetadata.TYPE, new SecurityMetadata(Instant.now(), configuration))
-                                .build();
-                        }
-
-                        @Override
-                        public void onFailure(String s, Exception e) {
-                            LOGGER.error(s, e);
-                        }
-                    }
-                ),
-                e -> LOGGER.error("Couldn't upload default configuration", e)
-            )
-        );
-    }
-
-    Future<Void> executeConfigurationInitialization(final SecurityMetadata securityMetadata) {
-        if (!initalizeConfigTask.isDone()) {
-            if (initializationInProcess.compareAndSet(false, true)) {
-                return threadPool.generic().submit(() -> {
-                    securityIndexHandler.loadConfiguration(securityMetadata.configuration(), ActionListener.wrap(cTypeConfigs -> {
-                        notifyConfigurationListeners(cTypeConfigs);
-                        final var auditConfigDocPresent = cTypeConfigs.containsKey(CType.AUDIT) && cTypeConfigs.get(CType.AUDIT).notEmpty();
-                        setupAuditConfigurationIfAny(auditConfigDocPresent);
-                        auditHotReloadingEnabled.getAndSet(auditConfigDocPresent);
-                        initalizeConfigTask.complete(null);
-                        LOGGER.info(
-                            "Security configuration initialized. Applied hashes: {}",
-                            securityMetadata.configuration()
-                                .stream()
-                                .map(c -> String.format("%s:%s", c.type().toLCString(), c.hash()))
-                                .collect(Collectors.toList())
-                        );
-                    }, e -> LOGGER.error("Couldn't reload security configuration", e)));
-                    return null;
-                });
-            }
-        }
-        return CompletableFuture.completedFuture(null);
-    }
-
-    @Deprecated
-    public CompletableFuture<Boolean> initOnNodeStart() {
-        final boolean installDefaultConfig = settings.getAsBoolean(ConfigConstants.SECURITY_ALLOW_DEFAULT_INIT_SECURITYINDEX, false);
-
-        final Supplier<CompletableFuture<Boolean>> startInitialization = () -> {
-            new Thread(() -> {
-                initalizeClusterConfiguration(installDefaultConfig);
-                initalizeConfigTask.complete(null);
-            }).start();
-            return initalizeConfigTask.thenApply(result -> installDefaultConfig);
-        };
-        try {
-            if (installDefaultConfig) {
-                LOGGER.info("Will attempt to create index {} and default configs if they are absent", securityIndex);
-                return startInitialization.get();
-            } else if (settings.getAsBoolean(ConfigConstants.SECURITY_BACKGROUND_INIT_IF_SECURITYINDEX_NOT_EXIST, true)) {
-                LOGGER.info(
-                    "Will not attempt to create index {} and default configs if they are absent."
-                        + " Use securityadmin to initialize cluster",
-                    securityIndex
-                );
-                return startInitialization.get();
-            } else {
-                LOGGER.info(
-                    "Will not attempt to create index {} and default configs if they are absent. "
-                        + "Will not perform background initialization",
-                    securityIndex
-                );
-                initalizeConfigTask.complete(null);
-                return initalizeConfigTask.thenApply(result -> installDefaultConfig);
-            }
-        } catch (Throwable e2) {
-            LOGGER.error("Error during node initialization: {}", e2, e2);
-            return startInitialization.get();
-        }
-    }
-
-    public boolean isAuditHotReloadingEnabled() {
-        if (settings.getAsBoolean(SECURITY_ALLOW_DEFAULT_INIT_USE_CLUSTER_STATE, false)) {
-            return auditHotReloadingEnabled.get();
-        } else {
-            return cl.isAuditConfigDocPresentInIndex();
-        }
-    }
-
-    public static ConfigurationRepository create(
-        Settings settings,
-        final Path configPath,
-        final ThreadPool threadPool,
-        Client client,
-        ClusterService clusterService,
-        AuditLog auditLog
-    ) {
-        final var securityIndex = settings.get(
-            ConfigConstants.SECURITY_CONFIG_INDEX_NAME,
-            ConfigConstants.OPENDISTRO_SECURITY_DEFAULT_CONFIG_INDEX
-        );
-        final var opendistroSecurityConfigVersionsIndex = settings.get(
-            ConfigConstants.SECURITY_CONFIG_VERSIONS_INDEX_NAME,
-            ConfigConstants.OPENDISTRO_SECURITY_CONFIG_VERSIONS_INDEX);
-        
-        LOGGER.info("Loaded settings - securityIndex: '{}', opendistroSecurityConfigVersionsIndex: '{}'", securityIndex, opendistroSecurityConfigVersionsIndex);
-
-        return new ConfigurationRepository(
-            securityIndex,
-            opendistroSecurityConfigVersionsIndex,
-            settings,
-            configPath,
-            threadPool,
-            client,
-            clusterService,
-            auditLog,
-            new SecurityIndexHandler(securityIndex, settings, client),
-            new ConfigurationLoaderSecurity7(client, threadPool, settings, clusterService)
-            new SecurityConfigVersionsLoader(client, settings)
-        );
-    }
-
-    public void setDynamicConfigFactory(DynamicConfigFactory dynamicConfigFactory) {
-        this.dynamicConfigFactory = dynamicConfigFactory;
-    }
-
-    /**
-     *
-     * @param configurationType
-     * @return can also return empty in case it was never loaded
-     */
-    public <T> SecurityDynamicConfiguration<T> getConfiguration(CType<T> configurationType) {
-        SecurityDynamicConfiguration<?> conf = configCache.getIfPresent(configurationType);
-        if (conf != null) {
-            @SuppressWarnings("unchecked")
-            SecurityDynamicConfiguration<T> result = (SecurityDynamicConfiguration<T>) conf.deepClone();
-            return result;
-        }
-        return SecurityDynamicConfiguration.empty(configurationType);
-    }
-
-    private final Lock LOCK = new ReentrantLock();
-
-    public boolean reloadConfiguration(final Collection<CType<?>> configTypes) throws ConfigUpdateAlreadyInProgressException {
-        return reloadConfiguration(configTypes, false);
-    }
-
-    private boolean reloadConfiguration(final Collection<CType<?>> configTypes, final boolean fromBackgroundThread)
-        throws ConfigUpdateAlreadyInProgressException {
-        if (!fromBackgroundThread && !initalizeConfigTask.isDone()) {
-            LOGGER.warn("Unable to reload configuration, initalization thread has not yet completed.");
-            return false;
-        }
-        return loadConfigurationWithLock(configTypes);
-    }
-
-    private boolean loadConfigurationWithLock(Collection<CType<?>> configTypes) {
-        try {
-            if (LOCK.tryLock(60, TimeUnit.SECONDS)) {
-                try {
-                    reloadConfiguration0(configTypes, this.acceptInvalid);
-                    return true;
-                } finally {
-                    LOCK.unlock();
-                }
-            } else {
-                throw new ConfigUpdateAlreadyInProgressException("A config update is already in progress");
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new ConfigUpdateAlreadyInProgressException("Interrupted config update");
-        }
-    }
-
-    private void reloadConfiguration0(Collection<CType<?>> configTypes, boolean acceptInvalid) {
-        ConfigurationMap loaded = getConfigurationsFromIndex(configTypes, false, acceptInvalid);
-        notifyConfigurationListeners(loaded);
-    }
-
-    private void notifyConfigurationListeners(ConfigurationMap configuration) {
-        configCache.putAll(configuration.rawMap());
-        notifyAboutChanges(configuration);
-    }
-
-    public synchronized void subscribeOnChange(ConfigurationChangeListener listener) {
-        configurationChangedListener.add(listener);
-    }
-
-    private synchronized void notifyAboutChanges(ConfigurationMap typeToConfig) {
-        for (ConfigurationChangeListener listener : configurationChangedListener) {
-            try {
-                LOGGER.debug("Notify {} listener about change configuration with type {}", listener, typeToConfig);
-                listener.onChange(typeToConfig);
-            } catch (Exception e) {
-                LOGGER.error("{} listener errored: " + e, listener, e);
-                throw ExceptionsHelper.convertToOpenSearchException(e);
-            }
-        }
-    }
-
-    /**
-     * This retrieves the config directly from the index without caching involved
-     * @param configTypes
-     * @param logComplianceEvent
-     * @return
-     */
-    public ConfigurationMap getConfigurationsFromIndex(Collection<CType<?>> configTypes, boolean logComplianceEvent) {
-        return getConfigurationsFromIndex(configTypes, logComplianceEvent, this.acceptInvalid);
-    }
-
-    public ConfigurationMap getConfigurationsFromIndex(
-        Collection<CType<?>> configTypes,
-        boolean logComplianceEvent,
-        boolean acceptInvalid
-    ) {
-
-        final ThreadContext threadContext = threadPool.getThreadContext();
-        final ConfigurationMap.Builder resultBuilder = new ConfigurationMap.Builder();
-
-        try (StoredContext ctx = threadContext.stashContext()) {
-            threadContext.putHeader(ConfigConstants.OPENDISTRO_SECURITY_CONF_REQUEST_HEADER, "true");
-
-            IndexMetadata securityMetadata = clusterService.state().metadata().index(this.securityIndex);
-            MappingMetadata mappingMetadata = securityMetadata == null ? null : securityMetadata.mapping();
-
-            if (securityMetadata != null && mappingMetadata != null) {
-                if ("security".equals(mappingMetadata.type())) {
-                    LOGGER.debug("security index exists and was created before ES 7 (legacy layout)");
-                } else {
-                    LOGGER.debug("security index exists and was created with ES 7 (new layout)");
-                }
-                resultBuilder.with(
-                    validate(cl.load(configTypes.toArray(new CType<?>[0]), 10, TimeUnit.SECONDS, acceptInvalid), configTypes.size())
-                );
-
-            } else {
-                // wait (and use new layout)
-                LOGGER.debug("security index not exists (yet)");
-                resultBuilder.with(
-                    validate(cl.load(configTypes.toArray(new CType<?>[0]), 10, TimeUnit.SECONDS, acceptInvalid), configTypes.size())
-                );
-            }
-
-        } catch (Exception e) {
-            throw new OpenSearchException(e);
-        }
-
-        ConfigurationMap result = resultBuilder.build();
-
-        if (logComplianceEvent && auditLog.getComplianceConfig() != null && auditLog.getComplianceConfig().isEnabled()) {
-            CType<?> configurationType = configTypes.iterator().next();
-            Map<String, String> fields = new HashMap<String, String>();
-            fields.put(configurationType.toLCString(), Strings.toString(MediaTypeRegistry.JSON, result.get(configurationType)));
-            auditLog.logDocumentRead(this.securityIndex, configurationType.toLCString(), null, fields);
-        }
-
-        return result;
-    }
-
-    private ConfigurationMap validate(ConfigurationMap conf, int expectedSize) throws InvalidConfigException {
-
-        if (conf == null || conf.size() != expectedSize) {
-            throw new InvalidConfigException("Retrieved only partial configuration");
-        }
-
-        return conf;
-    }
-
-    private static String formatDate(long date) {
-        return new SimpleDateFormat("yyyy-MM-dd", SecurityUtils.EN_Locale).format(new Date(date));
-    }
-
-    public static int getDefaultConfigVersion() {
-        return ConfigurationRepository.DEFAULT_CONFIG_VERSION;
-    }
-
-    @SuppressWarnings("removal")
-    private class AccessControllerWrappedThread extends Thread {
-        private final Thread innerThread;
-
-        public AccessControllerWrappedThread(Thread innerThread) {
-            this.innerThread = innerThread;
-        }
-
-        @Override
-        public void run() {
-            AccessController.doPrivileged(new PrivilegedAction<Void>() {
-
-                @Override
-                public Void run() {
-                    innerThread.run();
-                    return null;
-                }
-            });
-        }
-    }
-}
+     
+             document.addVersion(newVersion);
+             writeSecurityConfigVersion(document, document.getSeqNo(), document.getPrimaryTerm());
+             LOGGER.info("Successfully saved new security config version {}", newVersion.getVersion_id());
+     
+             } catch (org.opensearch.index.engine.VersionConflictEngineException conflictEx) {
+                 LOGGER.warn("Concurrent update detected on {}", SecurityConfigVersionsIndex);
+         } catch (Exception e) {
+             LOGGER.error("Failed to update security config version doc", e);
+         }
+     }
+  
+     private void setupAuditConfigurationIfAny(final boolean auditConfigDocPresent) {
+         final Set<String> deprecatedAuditKeysInSettings = AuditConfig.getDeprecatedKeys(settings);
+         if (!deprecatedAuditKeysInSettings.isEmpty()) {
+             LOGGER.warn(
+                 "Following keys {} are deprecated in opensearch settings. They will be removed in plugin v2.0.0.0",
+                 deprecatedAuditKeysInSettings
+             );
+         }
+         if (auditConfigDocPresent) {
+             if (!deprecatedAuditKeysInSettings.isEmpty()) {
+                 LOGGER.warn("Audit configuration settings found in both index and opensearch settings (deprecated)");
+             }
+             LOGGER.info("Hot-reloading of audit configuration is enabled");
+         } else {
+             LOGGER.info(
+                 "Hot-reloading of audit configuration is disabled. Using configuration with defaults from opensearch settings.  Populate the configuration in index using audit.yml or securityadmin to enable it."
+             );
+             auditLog.setConfig(AuditConfig.from(settings));
+         }
+     }
+  
+     private boolean createSecurityIndexIfAbsent() {
+         try {
+             final Map<String, Object> indexSettings = ImmutableMap.of("index.number_of_shards", 1, "index.auto_expand_replicas", "0-all");
+             final CreateIndexRequest createIndexRequest = new CreateIndexRequest(securityIndex).settings(indexSettings);
+             final boolean ok = client.admin().indices().create(createIndexRequest).actionGet().isAcknowledged();
+             LOGGER.info("Index {} created?: {}", securityIndex, ok);
+             return ok;
+         } catch (ResourceAlreadyExistsException resourceAlreadyExistsException) {
+             LOGGER.info("Index {} already exists", securityIndex);
+             return false;
+         }
+     }
+  
+     private boolean createOpendistroSecurityConfigVersionsIndexIfAbsent() {
+         try {
+             final Map<String, Object> indexSettings = ImmutableMap.of(
+                 "index.number_of_shards", 1,
+                 "index.auto_expand_replicas", "0-all"
+             );
+     
+             final Map<String, Object> mappings = Map.of(
+             "properties", Map.of(
+                 "versions", Map.of(
+                     "type", "object",
+                     "properties", Map.of(
+                         "version_id", Map.of( "type", "keyword"),
+                         "timestamp", Map.of("type", "date"),
+                         "modified_by", Map.of("type", "keyword"),
+                         "security_configs", Map.of(
+                             "type", "object",
+                             "enabled", false
+                         )
+                     )
+                 )
+             )
+         );           
+             LOGGER.info("Index request for {}", SecurityConfigVersionsIndex);
+             final CreateIndexRequest createIndexRequest = new CreateIndexRequest(SecurityConfigVersionsIndex)
+                 .settings(indexSettings)
+                 .mapping(mappings);
+     
+             final boolean ok = client.admin().indices().create(createIndexRequest).actionGet().isAcknowledged();
+             LOGGER.info("Index {} created?: {}", SecurityConfigVersionsIndex, ok);
+             return ok;
+         } catch (ResourceAlreadyExistsException resourceAlreadyExistsException) {
+             LOGGER.info("Index {} already exists", SecurityConfigVersionsIndex);
+             return false;
+         } catch (Exception e) {
+             LOGGER.error("Failed to create index {}", SecurityConfigVersionsIndex, e);
+             throw e;
+         }
+     }
+     
+  
+     private void waitForSecurityIndexToBeAtLeastYellow() {
+         LOGGER.info("Node started, try to initialize it. Wait for at least yellow cluster state....");
+         ClusterHealthResponse response = null;
+         try {
+             response = client.admin()
+                 .cluster()
+                 .health(new ClusterHealthRequest(securityIndex).waitForActiveShards(1).waitForYellowStatus())
+                 .actionGet();
+         } catch (Exception e) {
+             LOGGER.debug("Caught a {} but we just try again ...", e.toString());
+         }
+  
+         while (response == null || response.isTimedOut() || response.getStatus() == ClusterHealthStatus.RED) {
+             LOGGER.debug(
+                 "index '{}' not healthy yet, we try again ... (Reason: {})",
+                 securityIndex,
+                 response == null ? "no response" : (response.isTimedOut() ? "timeout" : "other, maybe red cluster")
+             );
+             try {
+                 TimeUnit.MILLISECONDS.sleep(500);
+             } catch (InterruptedException e) {
+                 // ignore
+                 Thread.currentThread().interrupt();
+             }
+             try {
+                 response = client.admin().cluster().health(new ClusterHealthRequest(securityIndex).waitForYellowStatus()).actionGet();
+             } catch (Exception e) {
+                 LOGGER.debug("Caught again a {} but we just try again ...", e.toString());
+             }
+         }
+     }
+  
+     private void waitForOpendistroSecurityConfigVersionsIndexToBeAtLeastYellow() {
+         LOGGER.info("Node started, try to initialize it. Wait for at least yellow cluster state....");
+         ClusterHealthResponse response = null;
+         try {
+             response = client.admin()
+                 .cluster()
+                 .health(new ClusterHealthRequest(SecurityConfigVersionsIndex).waitForActiveShards(1).waitForYellowStatus())
+                 .actionGet();
+         } catch (Exception e) {
+             LOGGER.debug("Caught a {} but we just try again ...", e.toString());
+         }
+  
+         while (response == null || response.isTimedOut() || response.getStatus() == ClusterHealthStatus.RED) {
+             LOGGER.debug(
+                 "index '{}' not healthy yet, we try again ... (Reason: {})",
+                 SecurityConfigVersionsIndex,
+                 response == null ? "no response" : (response.isTimedOut() ? "timeout" : "other, maybe red cluster")
+             );
+             try {
+                 TimeUnit.MILLISECONDS.sleep(500);
+             } catch (InterruptedException e) {
+                 // ignore
+                 Thread.currentThread().interrupt();
+             }
+             try {
+                 response = client.admin().cluster().health(new ClusterHealthRequest(SecurityConfigVersionsIndex).waitForYellowStatus()).actionGet();
+             } catch (Exception e) {
+                 LOGGER.debug("Caught again a {} but we just try again ...", e.toString());
+             }
+         }
+     }
+  
+     void initSecurityIndex(final ClusterChangedEvent event) {
+         if (!event.state().metadata().hasIndex(securityIndex)) {
+             securityIndexHandler.createIndex(
+                 ActionListener.wrap(r -> uploadDefaultConfiguration0(), e -> LOGGER.error("Couldn't create index {}", securityIndex, e))
+             );
+         } else {
+             // in case index was created and cluster state has not been changed (e.g. restart of the node or something)
+             // just upload default configuration
+             uploadDefaultConfiguration0();
+         }
+     }
+  
+     private void uploadDefaultConfiguration0() {
+         securityIndexHandler.uploadDefaultConfiguration(
+             resolveConfigDir(),
+             ActionListener.wrap(
+                 configuration -> clusterService.submitStateUpdateTask(
+                     "init-security-configuration",
+                     new ClusterStateUpdateTask(Priority.IMMEDIATE) {
+                         @Override
+                         public ClusterState execute(ClusterState clusterState) throws Exception {
+                             return ClusterState.builder(clusterState)
+                                 .putCustom(SecurityMetadata.TYPE, new SecurityMetadata(Instant.now(), configuration))
+                                 .build();
+                         }
+  
+                         @Override
+                         public void onFailure(String s, Exception e) {
+                             LOGGER.error(s, e);
+                         }
+                     }
+                 ),
+                 e -> LOGGER.error("Couldn't upload default configuration", e)
+             )
+         );
+     }
+  
+     Future<Void> executeConfigurationInitialization(final SecurityMetadata securityMetadata) {
+         if (!initalizeConfigTask.isDone()) {
+             if (initializationInProcess.compareAndSet(false, true)) {
+                 return threadPool.generic().submit(() -> {
+                     securityIndexHandler.loadConfiguration(securityMetadata.configuration(), ActionListener.wrap(cTypeConfigs -> {
+                         notifyConfigurationListeners(cTypeConfigs);
+                         final var auditConfigDocPresent = cTypeConfigs.containsKey(CType.AUDIT) && cTypeConfigs.get(CType.AUDIT).notEmpty();
+                         setupAuditConfigurationIfAny(auditConfigDocPresent);
+                         auditHotReloadingEnabled.getAndSet(auditConfigDocPresent);
+                         initalizeConfigTask.complete(null);
+                         LOGGER.info(
+                             "Security configuration initialized. Applied hashes: {}",
+                             securityMetadata.configuration()
+                                 .stream()
+                                 .map(c -> String.format("%s:%s", c.type().toLCString(), c.hash()))
+                                 .collect(Collectors.toList())
+                         );
+                     }, e -> LOGGER.error("Couldn't reload security configuration", e)));
+                     return null;
+                 });
+             }
+         }
+         return CompletableFuture.completedFuture(null);
+     }
+  
+     @Deprecated
+     public CompletableFuture<Boolean> initOnNodeStart() {
+         final boolean installDefaultConfig = settings.getAsBoolean(ConfigConstants.SECURITY_ALLOW_DEFAULT_INIT_SECURITYINDEX, false);
+  
+         final Supplier<CompletableFuture<Boolean>> startInitialization = () -> {
+             new Thread(() -> {
+                 initalizeClusterConfiguration(installDefaultConfig);
+                 initalizeConfigTask.complete(null);
+             }).start();
+             return initalizeConfigTask.thenApply(result -> installDefaultConfig);
+         };
+         try {
+             if (installDefaultConfig) {
+                 LOGGER.info("Will attempt to create index {} and default configs if they are absent", securityIndex);
+                 return startInitialization.get();
+             } else if (settings.getAsBoolean(ConfigConstants.SECURITY_BACKGROUND_INIT_IF_SECURITYINDEX_NOT_EXIST, true)) {
+                 LOGGER.info(
+                     "Will not attempt to create index {} and default configs if they are absent."
+                         + " Use securityadmin to initialize cluster",
+                     securityIndex
+                 );
+                 return startInitialization.get();
+             } else {
+                 LOGGER.info(
+                     "Will not attempt to create index {} and default configs if they are absent. "
+                         + "Will not perform background initialization",
+                     securityIndex
+                 );
+                 initalizeConfigTask.complete(null);
+                 return initalizeConfigTask.thenApply(result -> installDefaultConfig);
+             }
+         } catch (Throwable e2) {
+             LOGGER.error("Error during node initialization: {}", e2, e2);
+             return startInitialization.get();
+         }
+     }
+  
+     public boolean isAuditHotReloadingEnabled() {
+         if (settings.getAsBoolean(SECURITY_ALLOW_DEFAULT_INIT_USE_CLUSTER_STATE, false)) {
+             return auditHotReloadingEnabled.get();
+         } else {
+             return cl.isAuditConfigDocPresentInIndex();
+         }
+     }
+  
+     public static ConfigurationRepository create(
+         Settings settings,
+         final Path configPath,
+         final ThreadPool threadPool,
+         Client client,
+         ClusterService clusterService,
+         AuditLog auditLog
+     ) {
+         final var securityIndex = settings.get(
+             ConfigConstants.SECURITY_CONFIG_INDEX_NAME,
+             ConfigConstants.OPENDISTRO_SECURITY_DEFAULT_CONFIG_INDEX
+         );
+         final var SecurityConfigVersionsIndex = settings.get(
+             ConfigConstants.SECURITY_CONFIG_VERSIONS_INDEX_NAME,
+             ConfigConstants.OPENDISTRO_SECURITY_CONFIG_VERSIONS_INDEX);
+         
+         LOGGER.info("Loaded settings - securityIndex: '{}', SecurityConfigVersionsIndex: '{}'", securityIndex, SecurityConfigVersionsIndex);
+  
+         return new ConfigurationRepository(
+             securityIndex,
+             SecurityConfigVersionsIndex,
+             settings,
+             configPath,
+             threadPool,
+             client,
+             clusterService,
+             auditLog,
+             new SecurityIndexHandler(securityIndex, settings, client),
+             new SecurityConfigVersionsLoader(client, settings)
+         );
+     }
+  
+     public void setDynamicConfigFactory(DynamicConfigFactory dynamicConfigFactory) {
+         this.dynamicConfigFactory = dynamicConfigFactory;
+     }
+  
+     /**
+      *
+      * @param configurationType
+      * @return can also return empty in case it was never loaded
+      */
+     public <T> SecurityDynamicConfiguration<T> getConfiguration(CType<T> configurationType) {
+         SecurityDynamicConfiguration<?> conf = configCache.getIfPresent(configurationType);
+         if (conf != null) {
+             @SuppressWarnings("unchecked")
+             SecurityDynamicConfiguration<T> result = (SecurityDynamicConfiguration<T>) conf.deepClone();
+             return result;
+         }
+         return SecurityDynamicConfiguration.empty(configurationType);
+     }
+  
+     private final Lock LOCK = new ReentrantLock();
+  
+     public boolean reloadConfiguration(final Collection<CType<?>> configTypes) throws ConfigUpdateAlreadyInProgressException {
+         return reloadConfiguration(configTypes, false);
+     }
+  
+     private boolean reloadConfiguration(final Collection<CType<?>> configTypes, final boolean fromBackgroundThread)
+         throws ConfigUpdateAlreadyInProgressException {
+         if (!fromBackgroundThread && !initalizeConfigTask.isDone()) {
+             LOGGER.warn("Unable to reload configuration, initalization thread has not yet completed.");
+             return false;
+         }
+         return loadConfigurationWithLock(configTypes);
+     }
+  
+     private boolean loadConfigurationWithLock(Collection<CType<?>> configTypes) {
+         try {
+             if (LOCK.tryLock(60, TimeUnit.SECONDS)) {
+                 try {
+                     reloadConfiguration0(configTypes, this.acceptInvalid);
+                     return true;
+                 } finally {
+                     LOCK.unlock();
+                 }
+             } else {
+                 throw new ConfigUpdateAlreadyInProgressException("A config update is already in progress");
+             }
+         } catch (InterruptedException e) {
+             Thread.currentThread().interrupt();
+             throw new ConfigUpdateAlreadyInProgressException("Interrupted config update");
+         }
+     }
+  
+     private void reloadConfiguration0(Collection<CType<?>> configTypes, boolean acceptInvalid) {
+         ConfigurationMap loaded = getConfigurationsFromIndex(configTypes, false, acceptInvalid);
+         notifyConfigurationListeners(loaded);
+     }
+  
+     private void notifyConfigurationListeners(ConfigurationMap configuration) {
+         configCache.putAll(configuration.rawMap());
+         notifyAboutChanges(configuration);
+     }
+  
+     public synchronized void subscribeOnChange(ConfigurationChangeListener listener) {
+         configurationChangedListener.add(listener);
+     }
+  
+     private synchronized void notifyAboutChanges(ConfigurationMap typeToConfig) {
+         for (ConfigurationChangeListener listener : configurationChangedListener) {
+             try {
+                 LOGGER.debug("Notify {} listener about change configuration with type {}", listener, typeToConfig);
+                 listener.onChange(typeToConfig);
+             } catch (Exception e) {
+                 LOGGER.error("{} listener errored: " + e, listener, e);
+                 throw ExceptionsHelper.convertToOpenSearchException(e);
+             }
+         }
+     }
+  
+     /**
+      * This retrieves the config directly from the index without caching involved
+      * @param configTypes
+      * @param logComplianceEvent
+      * @return
+      */
+     public ConfigurationMap getConfigurationsFromIndex(Collection<CType<?>> configTypes, boolean logComplianceEvent) {
+         return getConfigurationsFromIndex(configTypes, logComplianceEvent, this.acceptInvalid);
+     }
+  
+     public ConfigurationMap getConfigurationsFromIndex(
+         Collection<CType<?>> configTypes,
+         boolean logComplianceEvent,
+         boolean acceptInvalid
+     ) {
+  
+         final ThreadContext threadContext = threadPool.getThreadContext();
+         final ConfigurationMap.Builder resultBuilder = new ConfigurationMap.Builder();
+  
+         try (StoredContext ctx = threadContext.stashContext()) {
+             threadContext.putHeader(ConfigConstants.OPENDISTRO_SECURITY_CONF_REQUEST_HEADER, "true");
+  
+             IndexMetadata securityMetadata = clusterService.state().metadata().index(this.securityIndex);
+             MappingMetadata mappingMetadata = securityMetadata == null ? null : securityMetadata.mapping();
+  
+             if (securityMetadata != null && mappingMetadata != null) {
+                 if ("security".equals(mappingMetadata.type())) {
+                     LOGGER.debug("security index exists and was created before ES 7 (legacy layout)");
+                 } else {
+                     LOGGER.debug("security index exists and was created with ES 7 (new layout)");
+                 }
+                 resultBuilder.with(
+                     validate(cl.load(configTypes.toArray(new CType<?>[0]), 10, TimeUnit.SECONDS, acceptInvalid), configTypes.size())
+                 );
+  
+             } else {
+                 // wait (and use new layout)
+                 LOGGER.debug("security index not exists (yet)");
+                 resultBuilder.with(
+                     validate(cl.load(configTypes.toArray(new CType<?>[0]), 10, TimeUnit.SECONDS, acceptInvalid), configTypes.size())
+                 );
+             }
+  
+         } catch (Exception e) {
+             throw new OpenSearchException(e);
+         }
+  
+         ConfigurationMap result = resultBuilder.build();
+  
+         if (logComplianceEvent && auditLog.getComplianceConfig() != null && auditLog.getComplianceConfig().isEnabled()) {
+             CType<?> configurationType = configTypes.iterator().next();
+             Map<String, String> fields = new HashMap<String, String>();
+             fields.put(configurationType.toLCString(), Strings.toString(MediaTypeRegistry.JSON, result.get(configurationType)));
+             auditLog.logDocumentRead(this.securityIndex, configurationType.toLCString(), null, fields);
+         }
+  
+         return result;
+     }
+  
+     private ConfigurationMap validate(ConfigurationMap conf, int expectedSize) throws InvalidConfigException {
+  
+         if (conf == null || conf.size() != expectedSize) {
+             throw new InvalidConfigException("Retrieved only partial configuration");
+         }
+  
+         return conf;
+     }
+  
+     private static String formatDate(long date) {
+         return new SimpleDateFormat("yyyy-MM-dd", SecurityUtils.EN_Locale).format(new Date(date));
+     }
+  
+     public static int getDefaultConfigVersion() {
+         return ConfigurationRepository.DEFAULT_CONFIG_VERSION;
+     }
+  
+     @SuppressWarnings("removal")
+     private class AccessControllerWrappedThread extends Thread {
+         private final Thread innerThread;
+  
+         public AccessControllerWrappedThread(Thread innerThread) {
+             this.innerThread = innerThread;
+         }
+  
+         @Override
+         public void run() {
+             AccessController.doPrivileged(new PrivilegedAction<Void>() {
+  
+                 @Override
+                 public Void run() {
+                     innerThread.run();
+                     return null;
+                 }
+             });
+         }
+     }
+ }

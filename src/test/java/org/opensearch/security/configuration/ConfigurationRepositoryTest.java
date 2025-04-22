@@ -70,6 +70,7 @@ import org.opensearch.security.user.User;
 
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
+import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.mockito.stubbing.OngoingStubbing;
 
@@ -146,6 +147,9 @@ public class ConfigurationRepositoryTest {
     @Mock
     private SecurityConfigVersionsLoader configVersionsLoader;
 
+    @SuppressWarnings("unchecked")
+    private static final Map<String, SecurityDynamicConfiguration<Object>> EMPTY_DYN_CONF_MAP = (Map<String, SecurityDynamicConfiguration<Object>>) (Map) Map.of();
+
     @Before
     public void setUp() {
         Settings settings = Settings.builder()
@@ -194,7 +198,6 @@ public class ConfigurationRepositoryTest {
         });
         return future;
     }
-
 
     private ConfigurationRepository createConfigurationRepository(Settings settings) {
         String securityIndex = settings.get(ConfigConstants.SECURITY_CONFIG_INDEX_NAME, ConfigConstants.OPENDISTRO_SECURITY_DEFAULT_CONFIG_INDEX);
@@ -618,14 +621,14 @@ public class ConfigurationRepositoryTest {
 
     @Test
     public void testFetchNextVersionId_shouldIncrementCorrectly() {
-        SecurityConfigVersionDocument.Version v3 = new SecurityConfigVersionDocument.Version(
+        SecurityConfigVersionDocument.Version<?> v3 = new SecurityConfigVersionDocument.Version<>(
             "v3",
             Instant.now().toString(),
             Map.of(),
             "test_user"
         );
-        when(configVersionsLoader.loadLatestVersion()).thenReturn(v3);
 
+        Mockito.<SecurityConfigVersionDocument.Version<?>>when(configVersionsLoader.loadLatestVersion()).thenReturn(v3);
         Settings s = Settings.builder()
             .put(ConfigConstants.SECURITY_CONFIG_VERSIONS_INDEX_NAME, ".opendistro_security_config_versions")
             .build();
@@ -638,14 +641,14 @@ public class ConfigurationRepositoryTest {
     @Test
     public void testSaveCurrentVersionToSystemIndex_shouldWriteIfChanged() throws IOException {
         SecurityConfigVersionDocument existingDoc = new SecurityConfigVersionDocument();
-        existingDoc.addVersion(new SecurityConfigVersionDocument.Version("v1", Instant.now().toString(), new HashMap<>(),"test_user"));
+        existingDoc.addVersion(new SecurityConfigVersionDocument.Version<Object>("v1", Instant.now().toString(), new HashMap<>(),"test_user"));
  
         when(configVersionsLoader.loadFullDocument()).thenReturn(existingDoc);
  
-        Map<String, SecurityConfigVersionDocument.SecurityConfig> newConfigs = new HashMap<>();
-        newConfigs.put("roles", new SecurityConfigVersionDocument.SecurityConfig("time", Map.of("entry", "val")));
+        Map<String, SecurityConfigVersionDocument.SecurityConfig<?>> newConfigs = new HashMap<>();
+        newConfigs.put("roles", new SecurityConfigVersionDocument.SecurityConfig<>("time", EMPTY_DYN_CONF_MAP));
 
-        SecurityConfigVersionDocument.Version newVer = new SecurityConfigVersionDocument.Version("v2", Instant.now().toString(), newConfigs, "test_user");
+        SecurityConfigVersionDocument.Version<Object> newVer = new SecurityConfigVersionDocument.Version<>("v2", Instant.now().toString(), newConfigs, "test_user");
 
         when(localClient.index(any())).thenReturn(mockActionFuture(null));
         
@@ -661,18 +664,18 @@ public class ConfigurationRepositoryTest {
 
     @Test
     public void testSaveCurrentVersionToSystemIndex_shouldSkipWriteIfNoChanges() throws IOException {
-        Map<String, SecurityConfigVersionDocument.SecurityConfig> oldConfigs = new HashMap<>();
-        oldConfigs.put("roles", new SecurityConfigVersionDocument.SecurityConfig("time", Map.of("entry", "val")));
-        SecurityConfigVersionDocument.Version v1 = new SecurityConfigVersionDocument.Version("v1", Instant.now().toString(), oldConfigs,"test_user");
+        Map<String, SecurityConfigVersionDocument.SecurityConfig<?>> oldConfigs = new HashMap<>();
+        oldConfigs.put("roles", new SecurityConfigVersionDocument.SecurityConfig<>("time", EMPTY_DYN_CONF_MAP));
+        SecurityConfigVersionDocument.Version<?> v1 = new SecurityConfigVersionDocument.Version<>("v1", Instant.now().toString(), oldConfigs,"test_user");
  
         SecurityConfigVersionDocument existingDoc = new SecurityConfigVersionDocument();
         existingDoc.addVersion(v1);
  
         when(configVersionsLoader.loadFullDocument()).thenReturn(existingDoc);
  
-        Map<String, SecurityConfigVersionDocument.SecurityConfig> sameConfigs = new HashMap<>();
-        sameConfigs.put("roles", new SecurityConfigVersionDocument.SecurityConfig("time", Map.of("entry", "val")));
-        SecurityConfigVersionDocument.Version newVer = new SecurityConfigVersionDocument.Version(
+        Map<String, SecurityConfigVersionDocument.SecurityConfig<?>> sameConfigs = new HashMap<>();
+        sameConfigs.put("roles", new SecurityConfigVersionDocument.SecurityConfig<>("time", EMPTY_DYN_CONF_MAP));
+        SecurityConfigVersionDocument.Version<?> newVer = new SecurityConfigVersionDocument.Version<>(
             "v2", Instant.now().toString(), sameConfigs, "test_user"
         );
  
@@ -687,17 +690,19 @@ public class ConfigurationRepositoryTest {
     @Test
     public void testUpdateSecurityConfigVersionAfterUpdate_shouldSaveIfChanged() throws IOException {
         SecurityConfigVersionDocument existingDoc = new SecurityConfigVersionDocument();
-        existingDoc.addVersion(new SecurityConfigVersionDocument.Version("v2", Instant.now().toString(), Map.of(), "test_user"));
+        existingDoc.addVersion(new SecurityConfigVersionDocument.Version<>("v2", Instant.now().toString(), Map.of(), "test_user"));
  
         when(configVersionsLoader.loadFullDocument()).thenReturn(existingDoc);
         when(localClient.index(any())).thenReturn(mockActionFuture(null));
  
         Settings s = Settings.builder().build();
-        ConfigurationRepository repo = createConfigurationRepository(s);
+        ConfigurationRepository repo = Mockito.spy(createConfigurationRepository(s));
   
-        Map<String, SecurityConfigVersionDocument.SecurityConfig> newConfigs = new HashMap<>();
-        newConfigs.put("test", null);
-        SecurityConfigVersionDocument.Version newVersion = new SecurityConfigVersionDocument.Version("v3", Instant.now().toString(), newConfigs, "test_user");
+        Map<String, SecurityConfigVersionDocument.SecurityConfig<?>> newConfigs = new HashMap<>();
+        newConfigs.put("test", new SecurityConfigVersionDocument.SecurityConfig<>("now", EMPTY_DYN_CONF_MAP));
+        SecurityConfigVersionDocument.Version<?> newVersion = new SecurityConfigVersionDocument.Version<>("v3", Instant.now().toString(), newConfigs, "test_user");
+
+        Mockito.doReturn(newVersion).when(repo).buildVersionFromSecurityIndex(Mockito.anyString(), Mockito.anyString());
 
         repo.updateSecurityConfigVersionAfterUpdate();
  
@@ -705,10 +710,10 @@ public class ConfigurationRepositoryTest {
     }
 
     public void testSortVersionsById_shouldSortNumerically() {
-        List<SecurityConfigVersionDocument.Version> versions = new ArrayList<>();
-        versions.add(new SecurityConfigVersionDocument.Version("v10", Instant.now().toString(), Map.of(),"test_user"));
-        versions.add(new SecurityConfigVersionDocument.Version("v2", Instant.now().toString(), Map.of(), "test_user"));
-        versions.add(new SecurityConfigVersionDocument.Version("v1", Instant.now().toString(), Map.of(), "test_user"));
+        List<SecurityConfigVersionDocument.Version<?>> versions = new ArrayList<>();
+        versions.add(new SecurityConfigVersionDocument.Version<Object>("v10", Instant.now().toString(), Map.of(),"test_user"));
+        versions.add(new SecurityConfigVersionDocument.Version<Object>("v2", Instant.now().toString(), Map.of(), "test_user"));
+        versions.add(new SecurityConfigVersionDocument.Version<Object>("v1", Instant.now().toString(), Map.of(), "test_user"));
  
         SecurityConfigVersionsLoader.sortVersionsById(versions);
  

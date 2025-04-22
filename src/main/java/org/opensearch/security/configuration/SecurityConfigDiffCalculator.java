@@ -1,106 +1,92 @@
 package org.opensearch.security.configuration;
  
-import com.google.common.collect.MapDifference;
-import com.google.common.collect.Maps;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.flipkart.zjsonpatch.JsonDiff;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.TreeMap;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.security.configuration.SecurityConfigVersionDocument.SecurityConfig;
 import org.opensearch.security.securityconf.impl.SecurityDynamicConfiguration;
+import org.opensearch.security.DefaultObjectMapper;
  
 public class SecurityConfigDiffCalculator {
     private static final Logger LOGGER = LogManager.getLogger(SecurityConfigDiffCalculator.class);
  
-    /**
-     * Checks if the security configuration has changed.
-     * This method normalizes both configurations (using sorted maps and removing the "lastUpdated" field)
-     * and then compares them.
-     *
-     * @param oldConfig the old configuration map
-     * @param newConfig the new configuration map
-     * @return true if there are differences; false otherwise.
-     */
-    public static boolean hasSecurityConfigChanged(Map<String, SecurityConfig> oldConfig, Map<String, SecurityConfig> newConfig) {
-        if (oldConfig == null || oldConfig.isEmpty()) {
-            LOGGER.info("Old configuration is empty. Treating as a new configuration.");
-            return true;
-        }
+    private static final ObjectMapper objectMapper = DefaultObjectMapper.objectMapper;
  
-        Map<String, Object> normOld = normalize(oldConfig);
-        Map<String, Object> normNew = normalize(newConfig);
+    public static boolean hasSecurityConfigChanged(Map<String, SecurityConfig<?>> oldConfig, Map<String, SecurityConfig<?>> newConfig) {
+        try {
+            if (oldConfig == null || oldConfig.isEmpty()) {
+                LOGGER.info("Old configuration is empty. Treating as a new configuration.");
+                return true;
+            }
+            
+            JsonNode oldNode = buildConfigDataNode(oldConfig);
+            JsonNode newNode = buildConfigDataNode(newConfig);
  
-        if (normOld.equals(normNew)) {
-            LOGGER.info("No changes detected in security configuration.");
+            JsonNode diff = JsonDiff.asJson(oldNode, newNode);
+ 
+            if (diff.isEmpty()) {
+                LOGGER.info("No changes detected in security configuration.");
+                return false;
+            } else {
+                LOGGER.info("Detected changes in security configuration: {}", diff.toString());
+                return true;
+            }
+        } catch (Exception e) {
+            LOGGER.error("Error while comparing security configurations", e);
             return false;
         }
- 
-        MapDifference<String, Object> diff = Maps.difference(normOld, normNew);
-        if (!diff.entriesOnlyOnLeft().isEmpty()) {
-            LOGGER.info("Removed entries: {}", diff.entriesOnlyOnLeft());
-        }
-        if (!diff.entriesOnlyOnRight().isEmpty()) {
-            LOGGER.info("Added entries: {}", diff.entriesOnlyOnRight());
-        }
-        if (!diff.entriesDiffering().isEmpty()) {
-            LOGGER.info("Modified entries:");
-            diff.entriesDiffering().forEach((key, value) -> {
-                LOGGER.info("Key: '{}', Old Value: {}, New Value: {}", key, value.leftValue(), value.rightValue());
-            });
-        }
- 
-        return true;
     }
- 
-    public static Map<String, Object> normalize(Map<String, SecurityConfig> config) {
-        Map<String, Object> normalizedMap = new TreeMap<>();
     
-        for (Map.Entry<String, SecurityConfig> entry : config.entrySet()) { 
-            SecurityConfig value = entry.getValue();
+    private static JsonNode buildConfigDataNode(Map<String, SecurityConfig<?>> configMap) {
+        Map<String, Map<String, ?>> structuredConfigData = new TreeMap<>();
     
-            if (value != null) {
-                // Normalize only `configData` and exclude `lastUpdated`
-                Map<String, Object> normalizedConfigData = normalizeConfigData(value.getConfigData());
-                normalizedMap.put(entry.getKey(), normalizedConfigData);
-            } else {
-                normalizedMap.put(entry.getKey(), null);
+        if (configMap == null) {
+            return objectMapper.createObjectNode();
+        }
+    
+        for (Map.Entry<String, SecurityConfig<?>> configEntry : configMap.entrySet()) {
+            String type = configEntry.getKey();
+            SecurityConfig<?> securityConfig = configEntry.getValue();
+    
+            if (securityConfig == null) {
+                continue;
             }
-        }
-        return normalizedMap;
-    }
     
-    private static Map<String, Object> normalizeConfigData(Map<String, ?> configData) {
-        Map<String, Object> normalizedConfigData = new TreeMap<>();
-    
-        for (Map.Entry<String, ?> entry : configData.entrySet()) {
-            Object value = entry.getValue();
-    
-            if (value instanceof SecurityDynamicConfiguration<?>) {
-                // Extract actual config data from SecurityDynamicConfiguration
-                SecurityDynamicConfiguration<?> config = (SecurityDynamicConfiguration<?>) value;
-                normalizedConfigData.put(entry.getKey(), extractConfigData(config));
-            } else if (value instanceof Map) {
-                // If it's already a Map, normalize it recursively
-                @SuppressWarnings("unchecked")
-                Map<String, Object> innerMap = (Map<String, Object>) value;
-                normalizedConfigData.put(entry.getKey(), normalizeConfigData(innerMap));
-            } else {
-                normalizedConfigData.put(entry.getKey(), value);
+            Map<String, ?> configData = securityConfig.getConfigData();
+            if (configData == null) {
+                continue;
             }
+    
+            Map<String, Map<String, ?>> extractedCEntriesPerType = new TreeMap<>();
+    
+            for (Map.Entry<String, ?> configDataEntry : configData.entrySet()) {
+                String configName = configDataEntry.getKey();
+                Object dynamicConfig = configDataEntry.getValue();
+    
+                if (dynamicConfig instanceof SecurityDynamicConfiguration<?>) {
+                    SecurityDynamicConfiguration<?> dynConf = (SecurityDynamicConfiguration<?>) dynamicConfig;
+                    if (dynConf.getCEntries() != null) {
+                        extractedCEntriesPerType.put(configName, new TreeMap<>(dynConf.getCEntries()));
+                    }
+                } else {
+                    try {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> serializedMap = objectMapper.convertValue(dynamicConfig, Map.class);
+                        extractedCEntriesPerType.put(configName, new TreeMap<>(serializedMap));
+                    } catch (Exception e) {
+                        LOGGER.error("Failed to serialize unexpected config type for {}: {}", configName, dynamicConfig.getClass().getName(), e);
+                    }
+                }
+            }
+    
+            structuredConfigData.put(type, extractedCEntriesPerType);
         }
     
-        return normalizedConfigData;
-    }
-    
-    private static Map<String, Object> extractConfigData(SecurityDynamicConfiguration<?> config) {
-        Map<String, Object> extractedMap = new TreeMap<>();
-    
-        Map<String, ?> configEntries = config.getCEntries();
-        if (configEntries != null) {
-            extractedMap.putAll(configEntries);
-        }
-    
-        return extractedMap;
-    }     
-    
+        return objectMapper.valueToTree(structuredConfigData);
+    }    
 }
