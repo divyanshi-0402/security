@@ -5,11 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.hc.core5.http.HttpStatus;
 import org.junit.Before;
 import org.junit.Test;
-import org.opensearch.core.rest.RestStatus;
 import org.opensearch.security.test.helper.rest.RestHelper.HttpResponse;
 import static org.opensearch.security.OpenSearchSecurityPlugin.PLUGINS_PREFIX;
-
-import java.util.Iterator;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
@@ -35,7 +32,9 @@ public class ViewVersionApiTest extends AbstractRestApiUnitTest {
                     "config_type_1": {
                     "lastUpdated": "2025-04-03T00:00:00Z",
                     "configData": {
-                        "key1": "value1"
+                        "key1": {
+                            "dummy": "value1"
+                        }
                     }
                     }
                 }
@@ -59,7 +58,7 @@ public class ViewVersionApiTest extends AbstractRestApiUnitTest {
 
     @Test
     public void testGetAllVersions_returnsOkAndHasVersionsArray() throws Exception {
-        HttpResponse response = rh.executeGetRequest(ENDPOINT + "/view_version");
+        HttpResponse response = rh.executeGetRequest(ENDPOINT + "/version");
 
         assertThat(response.getStatusCode(), is(HttpStatus.SC_OK));
 
@@ -79,7 +78,7 @@ public class ViewVersionApiTest extends AbstractRestApiUnitTest {
 
     @Test
     public void testGetSpecificVersion_returnsCorrectVersion() throws Exception {
-        HttpResponse response = rh.executeGetRequest(ENDPOINT + "/view_version/v1");
+        HttpResponse response = rh.executeGetRequest(ENDPOINT + "/version/v1");
 
         assertThat(response.getStatusCode(), is(HttpStatus.SC_OK));
 
@@ -95,7 +94,7 @@ public class ViewVersionApiTest extends AbstractRestApiUnitTest {
 
     @Test
     public void testGetSpecificVersionNotFound_returns404() throws Exception {
-        HttpResponse response = rh.executeGetRequest(ENDPOINT + "/view_version/does-not-exist");
+        HttpResponse response = rh.executeGetRequest(ENDPOINT + "/version/does-not-exist");
 
         assertThat(response.getStatusCode(), is(HttpStatus.SC_NOT_FOUND));
 
@@ -111,7 +110,7 @@ public class ViewVersionApiTest extends AbstractRestApiUnitTest {
     public void testGetAllVersions_forbiddenWithoutAdminCert() throws Exception {
         rh.sendAdminCertificate = false;
 
-        HttpResponse response = rh.executeGetRequest(ENDPOINT + "/view_version");
+        HttpResponse response = rh.executeGetRequest(ENDPOINT + "/version");
 
         assertThat(response.getStatusCode(), isOneOf(HttpStatus.SC_UNAUTHORIZED, HttpStatus.SC_FORBIDDEN));
     }

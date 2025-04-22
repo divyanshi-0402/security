@@ -18,7 +18,6 @@ import org.opensearch.security.dlic.rest.validation.EndpointValidator;
 import org.opensearch.security.dlic.rest.validation.RequestContentValidator;
  
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,18 +31,17 @@ import com.google.common.collect.ImmutableList;
  
 /**
  * REST endpoint: 
- *   GET _opendistro/_security/api/view_version
- *   GET _opendistro/_security/api/view_version/{versionId}
+ *   GET _opendistro/_security/api/version
+ *   GET _opendistro/_security/api/version/{versionId}
  */
 public class ViewVersionApiAction extends AbstractApiAction {
  
     private static final Logger LOGGER = LogManager.getLogger(ViewVersionApiAction.class);
- 
- 
+
     private static final List<Route> routes = addRoutesPrefix(
         ImmutableList.of(
-            new Route(Method.GET, "/view_version"),
-            new Route(Method.GET, "/view_version/{versionID}")
+            new Route(Method.GET, "/version"),
+            new Route(Method.GET, "/version/{versionID}")
         )
     );
  
@@ -129,78 +127,30 @@ public class ViewVersionApiAction extends AbstractApiAction {
      * Build the JSON structure:
      */  
 
-    private XContentBuilder buildVersionsJsonBuilder(List<SecurityConfigVersionDocument.Version> versions) throws IOException {
+    private XContentBuilder buildVersionsJsonBuilder(List<SecurityConfigVersionDocument.Version<?>> versions) throws IOException {
         XContentBuilder builder = XContentFactory.jsonBuilder().prettyPrint();
         builder.startObject();
         builder.startArray("versions");
-        for (SecurityConfigVersionDocument.Version ver : versions) {
+        for (SecurityConfigVersionDocument.Version<?> ver : versions) {
             builder.startObject();
             builder.field("version_id", ver.getVersion_id());
             builder.field("timestamp", ver.getTimestamp());
             builder.field("modified_by", ver.getModified_by());
             builder.field("security_configs");
-            builder.map(toPlainMap(ver.getSecurity_configs()));
+            Map<String, Object> plainConfigs = new LinkedHashMap<>();
+            for (Map.Entry<String, SecurityConfigVersionDocument.SecurityConfig<?>> entry : ver.getSecurity_configs().entrySet()) {
+                Map<String, Object> scMap = new LinkedHashMap<>();
+                scMap.put("lastUpdated", entry.getValue().getLastUpdated());
+                scMap.put("configData", entry.getValue().getConfigData());
+                plainConfigs.put(entry.getKey(), scMap);
+            }
+            builder.map(plainConfigs);
+
             builder.endObject();
         }
         builder.endArray();
         builder.endObject();
         return builder;
-    }
-    
-    private static Map<String, Object> toPlainMap(Map<String, SecurityConfigVersionDocument.SecurityConfig> original) {
-        Map<String, Object> result = new LinkedHashMap<>();
-        if (original == null) {
-            return result;
-        }
-        for (var entry : original.entrySet()) {
-            String key = entry.getKey();
-            SecurityConfigVersionDocument.SecurityConfig sc = entry.getValue();
-            if (sc == null) {
-                result.put(key, null);
-                continue;
-            }
-            Map<String, Object> scMap = new LinkedHashMap<>();
-            scMap.put("lastUpdated", sc.getLastUpdated());
-    
-            Map<String, Object> configData = safeConvert(sc.getConfigData()); 
-            scMap.put("configData", configData);
-    
-            result.put(key, scMap);
-        }
-        return result;
-    }
-    
-    @SuppressWarnings("unchecked")
-    private static Map<String, Object> safeConvert(Map<?, ?> raw) {
-        Map<String, Object> result = new LinkedHashMap<>();
-        if (raw == null) return result;
-        for (var entry : raw.entrySet()) {
-            String key = String.valueOf(entry.getKey());
-            Object val = entry.getValue();
-            if (val instanceof Map) {
-                result.put(key, safeConvert((Map<?,?>) val));
-            } 
-            else if (val instanceof List) {
-                result.put(key, safeListConvert((List<?>) val));
-            } else {
-                result.put(key, val);
-            }
-        }
-        return result;
-    }
-    
-    private static List<Object> safeListConvert(List<?> rawList) {
-        List<Object> newList = new ArrayList<>();
-        for (Object item : rawList) {
-            if (item instanceof Map) {
-                newList.add(safeConvert((Map<?,?>) item));
-            } else if (item instanceof List) {
-                newList.add(safeListConvert((List<?>) item));
-            } else {
-                newList.add(item);
-            }
-        }
-        return newList;
     }
  
     @Override

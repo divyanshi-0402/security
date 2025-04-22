@@ -7,7 +7,6 @@ import org.opensearch.test.framework.cluster.TestRestClient;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
-import static org.opensearch.security.api.AbstractApiIntegrationTest.*;
 import static org.opensearch.security.OpenSearchSecurityPlugin.PLUGINS_PREFIX;
 
 public class ViewVersionApiIntegrationTest extends AbstractApiIntegrationTest {
@@ -21,7 +20,7 @@ public class ViewVersionApiIntegrationTest extends AbstractApiIntegrationTest {
     }
 
     private String viewVersionBase() {
-        return endpointPrefix() + "/view_version";
+        return endpointPrefix() + "/version";
     }
 
     private String viewVersion(String versionId) {
@@ -45,7 +44,9 @@ public class ViewVersionApiIntegrationTest extends AbstractApiIntegrationTest {
                 + "  \"security_configs\": {"
                 + "    \"config_type_1\": {"
                 + "      \"lastUpdated\": \"2025-04-03T00:00:00Z\","
-                + "      \"configData\": { \"key1\": \"value1\" }"
+                + "      \"configData\": {"
+                + "        \"key1\": { \"dummy\": \"value1\" }"
+                + "      }"
                 + "    }"
                 + "  }"
                 + "} ] }\n";
