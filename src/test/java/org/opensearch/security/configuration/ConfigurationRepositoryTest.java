@@ -212,7 +212,7 @@ public class ConfigurationRepositoryTest {
             clusterService,
             auditLog,
             securityIndexHandler,
-            configurationLoaderSecurity7
+            configurationLoaderSecurity7,
             configVersionsLoader
         );
     }
@@ -604,6 +604,7 @@ public class ConfigurationRepositoryTest {
         ConfigurationMap result = configurationRepository.getConfigurationsFromIndex(CType.values(), false, false);
 
         assertThat(result.size(), is(CType.values().size()));
+    }
 
     @Test    
     public void testFetchNextVersionId_shouldReturn_v1_IfNoLatestVersion() {
@@ -709,6 +710,7 @@ public class ConfigurationRepositoryTest {
         verify(localClient).index(any());
     }
 
+    @Test
     public void testSortVersionsById_shouldSortNumerically() {
         List<SecurityConfigVersionDocument.Version<?>> versions = new ArrayList<>();
         versions.add(new SecurityConfigVersionDocument.Version<Object>("v10", Instant.now().toString(), Map.of(),"test_user"));

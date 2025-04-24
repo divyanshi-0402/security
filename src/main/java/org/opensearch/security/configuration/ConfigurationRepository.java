@@ -109,7 +109,7 @@ public class ConfigurationRepository implements ClusterStateListener {
     private static final Logger LOGGER = LogManager.getLogger(ConfigurationRepository.class);
 
     private final String securityIndex;
-    private final String opendistroSecurityConfigVersionsIndex;
+    private final String SecurityConfigVersionsIndex;
     private final Client client;
     private final Cache<CType<?>, SecurityDynamicConfiguration<?>> configCache;
     private final List<ConfigurationChangeListener> configurationChangedListener;
@@ -136,7 +136,7 @@ public class ConfigurationRepository implements ClusterStateListener {
     // visible for testing
     protected ConfigurationRepository(
         final String securityIndex,
-        final String opendistroSecurityConfigVersionsIndex,
+        final String SecurityConfigVersionsIndex,
         final Settings settings,
         final Path configPath,
         final ThreadPool threadPool,
@@ -144,11 +144,11 @@ public class ConfigurationRepository implements ClusterStateListener {
         final ClusterService clusterService,
         final AuditLog auditLog,
         final SecurityIndexHandler securityIndexHandler,
-        final ConfigurationLoaderSecurity7 configurationLoaderSecurity7
+        final ConfigurationLoaderSecurity7 configurationLoaderSecurity7,
         final SecurityConfigVersionsLoader configVersionsLoader
     ) {
         this.securityIndex = securityIndex;
-        this.opendistroSecurityConfigVersionsIndex = opendistroSecurityConfigVersionsIndex;
+        this.SecurityConfigVersionsIndex = SecurityConfigVersionsIndex;
         this.settings = settings;
         this.configPath = configPath;
         this.client = client;
@@ -735,6 +735,7 @@ public class ConfigurationRepository implements ClusterStateListener {
              clusterService,
              auditLog,
              new SecurityIndexHandler(securityIndex, settings, client),
+             new ConfigurationLoaderSecurity7(client, threadPool, settings, clusterService),
              new SecurityConfigVersionsLoader(client, settings)
          );
      }
