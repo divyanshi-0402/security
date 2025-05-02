@@ -109,7 +109,13 @@ public class SecurityRestApiActions {
                 threadPool,
                 securityApiDependencies,
                 new SecurityConfigVersionsLoader(client, settings)
-            )
+            ),
+            new RollbackVersionApiAction(
+                clusterService, 
+                threadPool, 
+                securityApiDependencies, 
+                new SecurityConfigVersionsLoader(client, settings), 
+                configurationRepository)
         );
     }
 

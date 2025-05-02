@@ -31,8 +31,8 @@ import com.google.common.collect.ImmutableList;
  
 /**
  * REST endpoint: 
- *   GET _opendistro/_security/api/version
- *   GET _opendistro/_security/api/version/{versionId}
+ *   GET /_plugins/_security/api/version
+ *   GET /_plugins/_security/api/version/{versionId}
  */
 public class ViewVersionApiAction extends AbstractApiAction {
  
