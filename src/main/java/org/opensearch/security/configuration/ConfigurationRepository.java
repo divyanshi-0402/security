@@ -200,6 +200,10 @@
              : new Environment(settings, configPath).configDir().toAbsolutePath().resolve("opensearch-security").toString() + File.separator;
          return cd;
      }
+
+     public Client getClient() {
+        return this.client;
+    }
  
      private void initalizeClusterConfiguration(final boolean installDefaultConfig) {
          try {

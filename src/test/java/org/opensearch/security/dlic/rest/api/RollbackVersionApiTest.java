@@ -1,17 +1,18 @@
 package org.opensearch.security.dlic.rest.api;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.hc.core5.http.HttpStatus;
 import org.junit.Before;
 import org.junit.Test;
 import org.opensearch.security.test.helper.rest.RestHelper.HttpResponse;
+import static org.opensearch.security.OpenSearchSecurityPlugin.PLUGINS_PREFIX;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 
 public class RollbackVersionApiTest extends AbstractRestApiUnitTest {
 
+    private final String ENDPOINT = getEndpointPrefix() + "/api";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     @Before
@@ -31,8 +32,7 @@ public class RollbackVersionApiTest extends AbstractRestApiUnitTest {
                       "lastUpdated": "2025-04-01T00:00:00Z",
                       "configData": {
                         "testuser": {
-                          "hash": "$2y$12$dummyHash",
-                          "backend_roles": ["role1"]
+                          "hash": "$2y$12$dummyHash"
                         }
                       }
                     }
@@ -47,8 +47,7 @@ public class RollbackVersionApiTest extends AbstractRestApiUnitTest {
                       "lastUpdated": "2025-04-05T00:00:00Z",
                       "configData": {
                         "testuser": {
-                          "hash": "$2y$12$anotherHash",
-                          "backend_roles": ["role2"]
+                          "hash": "$2y$12$anotherHash"
                         }
                       }
                     }
@@ -63,14 +62,20 @@ public class RollbackVersionApiTest extends AbstractRestApiUnitTest {
             docPayload
         );
 
+        rh.executePostRequest("/.opendistro_security_config_versions/_refresh", "");
+
         assertThat("Failed to insert config versions doc", response.getStatusCode(), is(201));
+    }
+
+      protected String getEndpointPrefix() {
+        return PLUGINS_PREFIX;
     }
 
     @Test
     public void testRollbackToPreviousVersion_success() throws Exception {
         rh.sendAdminCertificate = true;
 
-        HttpResponse response = rh.executePostRequest("/_opendistro/_security/api/rollback", "");
+        HttpResponse response = rh.executePostRequest(ENDPOINT + "/rollback", "");
 
         assertThat(response.getStatusCode(), is(HttpStatus.SC_OK));
         assertThat(response.getBody(), containsString("config rolled back to version v1"));
@@ -80,7 +85,7 @@ public class RollbackVersionApiTest extends AbstractRestApiUnitTest {
     public void testRollbackToSpecificVersion_success() throws Exception {
         rh.sendAdminCertificate = true;
 
-        HttpResponse response = rh.executePostRequest("/_opendistro/_security/api/rollback/version/v1", "");
+        HttpResponse response = rh.executePostRequest(ENDPOINT + "/rollback/version/v1", "");
 
         assertThat(response.getStatusCode(), is(HttpStatus.SC_OK));
         assertThat(response.getBody(), containsString("config rolled back to version v1"));
@@ -90,7 +95,7 @@ public class RollbackVersionApiTest extends AbstractRestApiUnitTest {
     public void testRollbackToInvalidVersion_shouldFail() throws Exception {
         rh.sendAdminCertificate = true;
 
-        HttpResponse response = rh.executePostRequest("/_opendistro/_security/api/rollback/version/invalid", "");
+        HttpResponse response = rh.executePostRequest(ENDPOINT + "/rollback/version/invalid", "");
 
         assertThat(response.getStatusCode(), is(HttpStatus.SC_NOT_FOUND));
         assertThat(response.getBody(), containsString("Version invalid not found"));
@@ -100,6 +105,7 @@ public class RollbackVersionApiTest extends AbstractRestApiUnitTest {
     public void testRollbackWithoutEnoughVersions_shouldFail() throws Exception {
         rh.sendAdminCertificate = true;
 
+        // Overwrite with a single version
         String singleVersionDoc = """
             {
               "versions": [
@@ -112,8 +118,7 @@ public class RollbackVersionApiTest extends AbstractRestApiUnitTest {
                       "lastUpdated": "2025-04-01T00:00:00Z",
                       "configData": {
                         "testuser": {
-                          "hash": "$2y$12$dummyHash",
-                          "backend_roles": ["role1"]
+                          "hash": "$2y$12$dummyHash"
                         }
                       }
                     }
@@ -128,9 +133,9 @@ public class RollbackVersionApiTest extends AbstractRestApiUnitTest {
             singleVersionDoc
         );
 
-        assertThat(overwrite.getStatusCode(), is(200));
+        assertThat("Failed to insert single-version doc", overwrite.getStatusCode(), isOneOf(200, 201));
 
-        HttpResponse rollback = rh.executePostRequest("/_opendistro/_security/api/rollback", "");
+        HttpResponse rollback = rh.executePostRequest(ENDPOINT + "/rollback", "");
         assertThat(rollback.getStatusCode(), is(HttpStatus.SC_NOT_FOUND));
         assertThat(rollback.getBody(), containsString("No previous version available to rollback"));
     }
@@ -139,8 +144,9 @@ public class RollbackVersionApiTest extends AbstractRestApiUnitTest {
     public void testRollbackWithoutAdminCert_shouldFail() throws Exception {
         rh.sendAdminCertificate = false;
 
-        HttpResponse response = rh.executePostRequest("/_opendistro/_security/api/rollback", "");
+        HttpResponse response = rh.executePostRequest(ENDPOINT + "/rollback", "");
 
-        assertThat(response.getStatusCode(), isOneOf(HttpStatus.SC_UNAUTHORIZED, HttpStatus.SC_FORBIDDEN));
+        assertThat("Expected UNAUTHORIZED or FORBIDDEN when no admin cert is provided",
+            response.getStatusCode(), isOneOf(HttpStatus.SC_UNAUTHORIZED, HttpStatus.SC_FORBIDDEN));
     }
 }
