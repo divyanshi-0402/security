@@ -4,10 +4,13 @@ import org.apache.http.HttpStatus;
 import org.junit.Before;
 import org.junit.Test;
 import org.opensearch.test.framework.cluster.TestRestClient;
+import java.util.Map;
+import java.io.IOException;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.opensearch.security.OpenSearchSecurityPlugin.PLUGINS_PREFIX;
+import static org.opensearch.security.support.ConfigConstants.SECURITY_CONFIG_VERSION_INDEX_ENABLED;
 
 
 public class RollbackVersionApiIntegrationTest extends AbstractApiIntegrationTest {
@@ -24,9 +27,17 @@ public class RollbackVersionApiIntegrationTest extends AbstractApiIntegrationTes
         return RollbackBase() + "/version/" + versionId;
     }
 
+    @Override
+    protected Map<String, Object> getClusterSettings() {
+        Map<String, Object> settings = super.getClusterSettings();
+        settings.put(SECURITY_CONFIG_VERSION_INDEX_ENABLED, true);
+        return settings;
+    }
+
     @Before
     public void setupConfigVersionsIndex() throws Exception {
         try (TestRestClient client = localCluster.getRestClient(ADMIN_USER_NAME, DEFAULT_PASSWORD)) {
+            client.get("/_cluster/health?wait_for_status=yellow&timeout=10s");
             client.delete("/.opendistro_security_config_versions");
             client.put("/.opendistro_security_config_versions");
             client.post("/_refresh");

@@ -368,6 +368,17 @@ public class ConfigConstants {
 
     public static final String USE_JDK_SERIALIZATION = "plugins.security.use_jdk_serialization";
 
+    //Security Config Version Index feature flag
+    public static final String SECURITY_CONFIG_VERSION_INDEX_ENABLED = "plugins.security.config_version_index.enabled";
+    public static final boolean SECURITY_CONFIG_VERSION_INDEX_ENABLED_DEFAULT = false;
+
+    public static boolean isVersionIndexEnabled(Settings settings) {
+        return settings.getAsBoolean(
+            SECURITY_CONFIG_VERSION_INDEX_ENABLED,
+            SECURITY_CONFIG_VERSION_INDEX_ENABLED_DEFAULT
+        );
+    }    
+
     // On-behalf-of endpoints settings
     // CS-SUPPRESS-SINGLE: RegexpSingleline get Extensions Settings
     public static final String EXTENSIONS_BWC_PLUGIN_MODE = "bwcPluginMode";

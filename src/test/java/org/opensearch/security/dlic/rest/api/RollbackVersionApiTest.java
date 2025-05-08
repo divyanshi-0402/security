@@ -6,6 +6,8 @@ import org.junit.Before;
 import org.junit.Test;
 import org.opensearch.security.test.helper.rest.RestHelper.HttpResponse;
 import static org.opensearch.security.OpenSearchSecurityPlugin.PLUGINS_PREFIX;
+import org.opensearch.common.settings.Settings;
+import static org.opensearch.security.support.ConfigConstants.SECURITY_CONFIG_VERSION_INDEX_ENABLED;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
@@ -17,7 +19,11 @@ public class RollbackVersionApiTest extends AbstractRestApiUnitTest {
 
     @Before
     public void startCluster() throws Exception {
-        super.setup();
+        Settings settings = Settings.builder()
+                  .put(SECURITY_CONFIG_VERSION_INDEX_ENABLED, true)
+                  .build();
+
+        super.setup(settings);
         rh.sendAdminCertificate = true;
 
         String docPayload = """

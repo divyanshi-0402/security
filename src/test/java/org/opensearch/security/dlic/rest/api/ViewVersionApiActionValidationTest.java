@@ -13,6 +13,9 @@ import org.junit.Before;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
+import org.opensearch.common.settings.Settings;
+import static org.opensearch.security.support.ConfigConstants.SECURITY_CONFIG_VERSION_INDEX_ENABLED;
+
 
 public class ViewVersionApiActionValidationTest extends AbstractApiActionValidationTest {
 
@@ -21,6 +24,20 @@ public class ViewVersionApiActionValidationTest extends AbstractApiActionValidat
     @Before
     public void setUp() {
         versionsLoader = mock(SecurityConfigVersionsLoader.class);
+
+        Settings settings = Settings.builder()
+        .put(SECURITY_CONFIG_VERSION_INDEX_ENABLED, true)
+        .build();
+
+        securityApiDependencies = new SecurityApiDependencies(
+            null,
+            configurationRepository,
+            null,
+            null,
+            restApiAdminPrivilegesEvaluator,
+            null,
+            settings
+        );
     }
     @Test
     public void allowsGetRequestOnConfigLoad() throws IOException {

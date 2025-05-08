@@ -132,6 +132,8 @@
      private final SecurityIndexHandler securityIndexHandler;
  
      private final SecurityConfigVersionsLoader configVersionsLoader;
+
+     private static final int MAX_VERSIONS_TO_KEEP = 10;
  
      // visible for testing
      protected ConfigurationRepository(
@@ -311,28 +313,31 @@
                  }
              }
  
-             LOGGER.info("Log before creating new system index, .opendistro_security_config_versions");
-             //Creating new system index, .opendistro_security_config_versions
-             createOpendistroSecurityConfigVersionsIndexIfAbsent();
-             waitForOpendistroSecurityConfigVersionsIndexToBeAtLeastYellow();
- 
-             // Building new version document and saving it to the new system index (.opendistro_security_config_versions)
-             String nextVersionId = fetchNextVersionId();
-             final ThreadContext threadContext = threadPool.getThreadContext();
-             User user = threadContext.getTransient(ConfigConstants.OPENDISTRO_SECURITY_USER);
- 
-             String userinfo;
-             if (user != null) {
-                 userinfo = user.getName();
-             } else if ("v1".equals(nextVersionId)) {
-                 userinfo = "system";
-             } else {
-                 userinfo = "unknown";
-             }
-              
-              SecurityConfigVersionDocument.Version<?> version = buildVersionFromSecurityIndex(nextVersionId, userinfo);
-              saveCurrentVersionToSystemIndex(version);
-   
+             if (ConfigConstants.isVersionIndexEnabled(settings)) {
+
+                LOGGER.info("Log before creating new system index, .opendistro_security_config_versions");
+                //Creating new system index, .opendistro_security_config_versions
+                createOpendistroSecurityConfigVersionsIndexIfAbsent();
+                waitForOpendistroSecurityConfigVersionsIndexToBeAtLeastYellow();
+    
+                // Building new version document and saving it to the new system index (.opendistro_security_config_versions)
+                String nextVersionId = fetchNextVersionId();
+                final ThreadContext threadContext = threadPool.getThreadContext();
+                User user = threadContext.getTransient(ConfigConstants.OPENDISTRO_SECURITY_USER);
+    
+                String userinfo;
+                if (user != null) {
+                    userinfo = user.getName();
+                } else if ("v1".equals(nextVersionId)) {
+                    userinfo = "system";
+                } else {
+                    userinfo = "unknown";
+                }
+                
+                SecurityConfigVersionDocument.Version<?> version = buildVersionFromSecurityIndex(nextVersionId, userinfo);
+                saveCurrentVersionToSystemIndex(version);
+
+            }
               setupAuditConfigurationIfAny(cl.isAuditConfigDocPresentInIndex());
               LOGGER.info("Node '{}' initialized", clusterService.localNode().getName());
    
@@ -401,6 +406,15 @@
               writeSecurityConfigVersion(document, document.getSeqNo(), document.getPrimaryTerm());
  
              LOGGER.info("Successfully saved version {} to {}", version.getVersion_id(), SecurityConfigVersionsIndex);
+
+               // Async retention task
+            threadPool.generic().submit(() -> {
+                try {
+                    applyRetentionPolicyAsync();
+                } catch (Exception e) {
+                    LOGGER.warn("Retention policy async failed", e);
+                }
+            });
  
              } catch (org.opensearch.index.engine.VersionConflictEngineException conflictEx) {
                   LOGGER.warn("Concurrent update detected on {}", SecurityConfigVersionsIndex);
@@ -435,6 +449,10 @@
      }   
       
       public void updateSecurityConfigVersionAfterUpdate() {
+          if (!ConfigConstants.isVersionIndexEnabled(settings)) {
+              LOGGER.info("Skipping version update: security config version index is disabled");
+              return;
+          }
           try {
               String nextVersionId = fetchNextVersionId();
               final ThreadContext threadContext = threadPool.getThreadContext();
@@ -457,6 +475,15 @@
               document.addVersion(newVersion);
               writeSecurityConfigVersion(document, document.getSeqNo(), document.getPrimaryTerm());
               LOGGER.info("Successfully saved new security config version {}", newVersion.getVersion_id());
+
+              // Async retention task
+            threadPool.generic().submit(() -> {
+                try {
+                    applyRetentionPolicyAsync();
+                } catch (Exception e) {
+                    LOGGER.warn("Retention policy async failed", e);
+                }
+            });
       
               } catch (org.opensearch.index.engine.VersionConflictEngineException conflictEx) {
                   LOGGER.warn("Concurrent update detected on {}", SecurityConfigVersionsIndex);
@@ -464,6 +491,28 @@
               LOGGER.error("Failed to update security config version doc", e);
           }
       }
+
+      public void applyRetentionPolicyAsync() {
+        SecurityConfigVersionDocument document = configVersionsLoader.loadFullDocument();
+        List<SecurityConfigVersionDocument.Version<?>> versions = document.getVersions();
+
+        SecurityConfigVersionsLoader.sortVersionsById(versions);
+
+        if (versions.size() > MAX_VERSIONS_TO_KEEP) {
+            int numVersionsToDelete = versions.size() - MAX_VERSIONS_TO_KEEP;
+            LOGGER.info("Applying retention policy: deleting {} old security config versions", numVersionsToDelete);
+
+            for (int i = 0; i < numVersionsToDelete; i++) {
+                versions.remove(0);
+            }
+
+            try {
+                writeSecurityConfigVersion(document, document.getSeqNo(), document.getPrimaryTerm());
+            } catch (Exception e) {
+                LOGGER.warn("Failed to write document after pruning old versions", e);
+            }
+        }
+    }
    
       private void setupAuditConfigurationIfAny(final boolean auditConfigDocPresent) {
           final Set<String> deprecatedAuditKeysInSettings = AuditConfig.getDeprecatedKeys(settings);

@@ -2074,6 +2074,16 @@ public final class OpenSearchSecurityPlugin extends OpenSearchSecuritySSLPlugin
 
             // Privileges evaluation
             settings.add(ActionPrivileges.PRECOMPUTED_PRIVILEGES_MAX_HEAP_SIZE);
+
+            //Security Config Version Index
+            settings.add(
+                Setting.boolSetting(
+                    ConfigConstants.SECURITY_CONFIG_VERSION_INDEX_ENABLED,
+                    ConfigConstants.SECURITY_CONFIG_VERSION_INDEX_ENABLED_DEFAULT,
+                    Property.NodeScope,
+                    Property.Filtered
+                )
+            );
         }
 
         return settings;
