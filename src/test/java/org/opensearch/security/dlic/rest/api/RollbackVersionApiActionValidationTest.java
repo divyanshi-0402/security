@@ -7,6 +7,8 @@ import org.opensearch.security.configuration.SecurityConfigVersionsLoader;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
 import static org.mockito.Mockito.*;
+import org.opensearch.common.settings.Settings;
+import static org.opensearch.security.support.ConfigConstants.SECURITY_CONFIG_VERSION_INDEX_ENABLED;
 
 import java.io.IOException;
 
@@ -16,6 +18,20 @@ public class RollbackVersionApiActionValidationTest extends AbstractApiActionVal
 
     @Before
     public void setupTest() {
+        Settings settings = Settings.builder()
+                .put(SECURITY_CONFIG_VERSION_INDEX_ENABLED, true)
+                .build();
+        
+                securityApiDependencies = new SecurityApiDependencies(
+                    null,
+                    configurationRepository,
+                    null,
+                    null,
+                    restApiAdminPrivilegesEvaluator,
+                    null,
+                    settings
+                );
+
         SecurityConfigVersionsLoader versionsLoader = mock(SecurityConfigVersionsLoader.class);
         rollbackVersionApiAction = new RollbackVersionApiAction(
             clusterService,

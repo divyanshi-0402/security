@@ -696,7 +696,9 @@
          when(configVersionsLoader.loadFullDocument()).thenReturn(existingDoc);
          when(localClient.index(any())).thenReturn(mockActionFuture(null));
   
-         Settings s = Settings.builder().build();
+         Settings s = Settings.builder()
+            .put(ConfigConstants.SECURITY_CONFIG_VERSION_INDEX_ENABLED, true)
+            .build();
          ConfigurationRepository repo = Mockito.spy(createConfigurationRepository(s));
    
          Map<String, SecurityConfigVersionDocument.SecurityConfig<?>> newConfigs = new HashMap<>();
@@ -723,6 +725,30 @@
          assertThat(versions.get(1).getVersion_id(), is("v2"));
          assertThat(versions.get(2).getVersion_id(), is("v10"));
      }
+
+     @Test
+    public void testApplyRetentionPolicyAsync_shouldPruneOldVersions() throws Exception {
+        SecurityConfigVersionDocument document = new SecurityConfigVersionDocument();
+        for (int i = 1; i <= 12; i++) {
+            document.addVersion(new SecurityConfigVersionDocument.Version<>(
+                "v" + i, Instant.now().toString(), Map.of(), "test_user"
+            ));
+        }
+
+        Settings s = Settings.builder()
+            .put(ConfigConstants.SECURITY_CONFIG_VERSIONS_INDEX_NAME, ".opendistro_security_config_versions")
+            .build();
+        ConfigurationRepository repo = createConfigurationRepository(s);
+
+        when(configVersionsLoader.loadFullDocument()).thenReturn(document);
+
+        when(localClient.index(any())).thenReturn(mockActionFuture(null));
+
+        repo.applyRetentionPolicyAsync();
+
+        assertThat(document.getVersions().size(), is(10));
+        assertThat(document.getVersions().get(0).getVersion_id(), is("v3"));
+    }
  
      void assertClusterState(final ArgumentCaptor<ClusterStateUpdateTask> clusterStateUpdateTaskCaptor) throws Exception {
          final var initializedStateUpdate = clusterStateUpdateTaskCaptor.getValue();
