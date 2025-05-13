@@ -64,6 +64,10 @@ import org.opensearch.security.support.ConfigConstants;
 import org.opensearch.security.support.WildcardMatcher;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.client.Client;
+import org.opensearch.common.util.concurrent.ThreadContext;
+import org.opensearch.security.user.User;
+import org.opensearch.security.configuration.SecurityConfigVersionDocument;
+import org.greenrobot.eventbus.Subscribe;
 
 import org.greenrobot.eventbus.EventBus;
 import org.greenrobot.eventbus.EventBusBuilder;
@@ -155,6 +159,7 @@ public class DynamicConfigFactory implements Initializable, ConfigurationChangeL
         }
 
         registerDCFListener(this.iab);
+        registerDCFListener(this);
         this.cr.subscribeOnChange(this);
     }
 
@@ -273,10 +278,39 @@ public class DynamicConfigFactory implements Initializable, ConfigurationChangeL
         if (cr.isAuditHotReloadingEnabled()) {
             eventBus.post(audit == null ? defaultAuditConfig : audit);
         }
+        eventBus.post(new ConfigInitializedEvent());
 
         initialized.set(true);
     }
 
+    public static class ConfigInitializedEvent {}
+    
+    @Subscribe
+    public void onInitialConfig(ConfigInitializedEvent event) {
+        if (!ConfigConstants.isVersionIndexEnabled(opensearchSettings)) {
+            return;
+        }      
+    
+        try {
+            log.info("Initializing version index (.opendistro_security_config_versions)");
+    
+            cr.createOpendistroSecurityConfigVersionsIndexIfAbsent();
+            cr.waitForOpendistroSecurityConfigVersionsIndexToBeAtLeastYellow();
+    
+            String nextVersionId = cr.fetchNextVersionId();
+            final ThreadContext threadContext = cr.getThreadPool().getThreadContext();
+            User user = threadContext.getTransient(ConfigConstants.OPENDISTRO_SECURITY_USER);
+    
+            String userinfo = (user != null) ? user.getName() : ("v1".equals(nextVersionId) ? "system" : "unknown");
+    
+            SecurityConfigVersionDocument.Version<?> version = cr.buildVersionFromSecurityIndex(nextVersionId, userinfo);
+            cr.saveCurrentVersionToSystemIndex(version);
+    
+        } catch (Exception e) {
+            log.error("Failed to save initial version config", e);
+        }
+    }
+    
     private static ConfigV7 getConfigV7(SecurityDynamicConfiguration<?> sdc) {
         @SuppressWarnings("unchecked")
         SecurityDynamicConfiguration<ConfigV7> c = (SecurityDynamicConfiguration<ConfigV7>) sdc;

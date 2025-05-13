@@ -313,31 +313,6 @@
                  }
              }
  
-             if (ConfigConstants.isVersionIndexEnabled(settings)) {
-
-                LOGGER.info("Log before creating new system index, .opendistro_security_config_versions");
-                //Creating new system index, .opendistro_security_config_versions
-                createOpendistroSecurityConfigVersionsIndexIfAbsent();
-                waitForOpendistroSecurityConfigVersionsIndexToBeAtLeastYellow();
-    
-                // Building new version document and saving it to the new system index (.opendistro_security_config_versions)
-                String nextVersionId = fetchNextVersionId();
-                final ThreadContext threadContext = threadPool.getThreadContext();
-                User user = threadContext.getTransient(ConfigConstants.OPENDISTRO_SECURITY_USER);
-    
-                String userinfo;
-                if (user != null) {
-                    userinfo = user.getName();
-                } else if ("v1".equals(nextVersionId)) {
-                    userinfo = "system";
-                } else {
-                    userinfo = "unknown";
-                }
-                
-                SecurityConfigVersionDocument.Version<?> version = buildVersionFromSecurityIndex(nextVersionId, userinfo);
-                saveCurrentVersionToSystemIndex(version);
-
-            }
               setupAuditConfigurationIfAny(cl.isAuditConfigDocPresentInIndex());
               LOGGER.info("Node '{}' initialized", clusterService.localNode().getName());
    
@@ -345,6 +320,10 @@
               LOGGER.error("Unexpected exception while initializing node " + e, e);
           }
       }
+
+    public ThreadPool getThreadPool() {
+        return this.threadPool;
+    }    
    
       @SuppressWarnings("unchecked")
       public String fetchNextVersionId() {
@@ -548,7 +527,7 @@
           }
       }
    
-      private boolean createOpendistroSecurityConfigVersionsIndexIfAbsent() {
+      public boolean createOpendistroSecurityConfigVersionsIndexIfAbsent() {
           try {
               final Map<String, Object> indexSettings = ImmutableMap.of(
                   "index.number_of_shards", 1,
@@ -621,7 +600,7 @@
           }
       }
    
-      private void waitForOpendistroSecurityConfigVersionsIndexToBeAtLeastYellow() {
+      public void waitForOpendistroSecurityConfigVersionsIndexToBeAtLeastYellow() {
           LOGGER.info("Node started, try to initialize it. Wait for at least yellow cluster state....");
           ClusterHealthResponse response = null;
           try {
