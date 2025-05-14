@@ -100,6 +100,8 @@
  import org.opensearch.security.configuration.SecurityConfigDiffCalculator;
  import org.opensearch.security.configuration.SecurityConfigVersionsLoader;
  import org.opensearch.security.user.User;
+ import static org.opensearch.security.support.ConfigConstants.SECURITY_CONFIG_VERSION_INDEX_ENABLED;
+ import static org.opensearch.security.support.ConfigConstants.SECURITY_CONFIG_VERSION_INDEX_ENABLED_DEFAULT;
  
  import com.google.common.cache.Cache;
  import com.google.common.cache.CacheBuilder;
@@ -319,11 +321,14 @@
           } catch (Exception e) {
               LOGGER.error("Unexpected exception while initializing node " + e, e);
           }
-      }
+      }   
 
-    public ThreadPool getThreadPool() {
-        return this.threadPool;
-    }    
+      public static boolean isVersionIndexEnabled(Settings settings) {
+        return settings.getAsBoolean(
+            SECURITY_CONFIG_VERSION_INDEX_ENABLED,
+            SECURITY_CONFIG_VERSION_INDEX_ENABLED_DEFAULT
+        );
+    }  
    
       @SuppressWarnings("unchecked")
       public String fetchNextVersionId() {
@@ -389,7 +394,7 @@
                // Async retention task
             threadPool.generic().submit(() -> {
                 try {
-                    applyRetentionPolicyAsync();
+                    applySecurityConfigVersionIndexRetentionPolicy();
                 } catch (Exception e) {
                     LOGGER.warn("Retention policy async failed", e);
                 }
@@ -428,7 +433,7 @@
      }   
       
       public void updateSecurityConfigVersionAfterUpdate() {
-          if (!ConfigConstants.isVersionIndexEnabled(settings)) {
+          if (!isVersionIndexEnabled(settings)) {
               LOGGER.info("Skipping version update: security config version index is disabled");
               return;
           }
@@ -458,7 +463,7 @@
               // Async retention task
             threadPool.generic().submit(() -> {
                 try {
-                    applyRetentionPolicyAsync();
+                    applySecurityConfigVersionIndexRetentionPolicy();
                 } catch (Exception e) {
                     LOGGER.warn("Retention policy async failed", e);
                 }
@@ -471,7 +476,7 @@
           }
       }
 
-      public void applyRetentionPolicyAsync() {
+      public void applySecurityConfigVersionIndexRetentionPolicy() {
         SecurityConfigVersionDocument document = configVersionsLoader.loadFullDocument();
         List<SecurityConfigVersionDocument.Version<?>> versions = document.getVersions();
 

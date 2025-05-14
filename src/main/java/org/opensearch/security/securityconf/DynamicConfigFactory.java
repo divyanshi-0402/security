@@ -45,6 +45,7 @@ import org.opensearch.security.DefaultObjectMapper;
 import org.opensearch.security.auditlog.config.AuditConfig;
 import org.opensearch.security.auth.internal.InternalAuthenticationBackend;
 import org.opensearch.security.configuration.ClusterInfoHolder;
+import org.opensearch.security.configuration.ConfigVersionInitializer;
 import org.opensearch.security.configuration.ConfigurationChangeListener;
 import org.opensearch.security.configuration.ConfigurationMap;
 import org.opensearch.security.configuration.ConfigurationRepository;
@@ -65,9 +66,6 @@ import org.opensearch.security.support.WildcardMatcher;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.client.Client;
 import org.opensearch.common.util.concurrent.ThreadContext;
-import org.opensearch.security.user.User;
-import org.opensearch.security.configuration.SecurityConfigVersionDocument;
-import org.greenrobot.eventbus.Subscribe;
 
 import org.greenrobot.eventbus.EventBus;
 import org.greenrobot.eventbus.EventBusBuilder;
@@ -129,6 +127,7 @@ public class DynamicConfigFactory implements Initializable, ConfigurationChangeL
     private final Path configPath;
     private final InternalAuthenticationBackend iab;
     private final ClusterInfoHolder cih;
+    private final ThreadPool threadPool;
 
     SecurityDynamicConfiguration<?> config;
 
@@ -147,6 +146,7 @@ public class DynamicConfigFactory implements Initializable, ConfigurationChangeL
         this.configPath = configPath;
         this.cih = cih;
         this.iab = new InternalAuthenticationBackend(passwordHasher);
+        this.threadPool = threadPool;
 
         if (opensearchSettings.getAsBoolean(ConfigConstants.SECURITY_UNSUPPORTED_LOAD_STATIC_RESOURCES, true)) {
             try {
@@ -159,7 +159,6 @@ public class DynamicConfigFactory implements Initializable, ConfigurationChangeL
         }
 
         registerDCFListener(this.iab);
-        registerDCFListener(this);
         this.cr.subscribeOnChange(this);
     }
 
@@ -278,38 +277,16 @@ public class DynamicConfigFactory implements Initializable, ConfigurationChangeL
         if (cr.isAuditHotReloadingEnabled()) {
             eventBus.post(audit == null ? defaultAuditConfig : audit);
         }
+        
+        ThreadContext threadContext = threadPool.getThreadContext();
+        registerDCFListener(new ConfigVersionInitializer(cr, opensearchSettings, threadContext));
+        
         eventBus.post(new ConfigInitializedEvent());
 
         initialized.set(true);
     }
 
     public static class ConfigInitializedEvent {}
-    
-    @Subscribe
-    public void onInitialConfig(ConfigInitializedEvent event) {
-        if (!ConfigConstants.isVersionIndexEnabled(opensearchSettings)) {
-            return;
-        }      
-    
-        try {
-            log.info("Initializing version index (.opendistro_security_config_versions)");
-    
-            cr.createOpendistroSecurityConfigVersionsIndexIfAbsent();
-            cr.waitForOpendistroSecurityConfigVersionsIndexToBeAtLeastYellow();
-    
-            String nextVersionId = cr.fetchNextVersionId();
-            final ThreadContext threadContext = cr.getThreadPool().getThreadContext();
-            User user = threadContext.getTransient(ConfigConstants.OPENDISTRO_SECURITY_USER);
-    
-            String userinfo = (user != null) ? user.getName() : ("v1".equals(nextVersionId) ? "system" : "unknown");
-    
-            SecurityConfigVersionDocument.Version<?> version = cr.buildVersionFromSecurityIndex(nextVersionId, userinfo);
-            cr.saveCurrentVersionToSystemIndex(version);
-    
-        } catch (Exception e) {
-            log.error("Failed to save initial version config", e);
-        }
-    }
     
     private static ConfigV7 getConfigV7(SecurityDynamicConfiguration<?> sdc) {
         @SuppressWarnings("unchecked")
