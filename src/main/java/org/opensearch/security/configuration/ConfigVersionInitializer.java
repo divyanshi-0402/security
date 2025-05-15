@@ -8,12 +8,20 @@ import org.opensearch.security.configuration.SecurityConfigVersionDocument.Versi
 import org.opensearch.security.securityconf.DynamicConfigFactory;
 import org.opensearch.security.support.ConfigConstants;
 import org.opensearch.security.user.User;
+import java.util.Map;
+import com.google.common.collect.ImmutableMap;
+import org.opensearch.transport.client.Client;
+
+import org.opensearch.ResourceAlreadyExistsException;
+import org.opensearch.action.admin.indices.create.CreateIndexRequest;
 
 import org.greenrobot.eventbus.Subscribe;
 
 public class ConfigVersionInitializer {
 
     private static final Logger log = LogManager.getLogger(ConfigVersionInitializer.class);
+    private final Client client;
+    private final String SecurityConfigVersionsIndex;
 
     private final ConfigurationRepository cr;
     private final Settings settings;
@@ -23,6 +31,11 @@ public class ConfigVersionInitializer {
         this.cr = cr;
         this.settings = settings;
         this.threadContext = threadContext;
+        this.client = cr.getClient();
+        this.SecurityConfigVersionsIndex = settings.get(
+                ConfigConstants.SECURITY_CONFIG_VERSIONS_INDEX_NAME,
+                ConfigConstants.OPENDISTRO_SECURITY_CONFIG_VERSIONS_INDEX
+        );
     }
 
     @Subscribe
@@ -30,9 +43,9 @@ public class ConfigVersionInitializer {
         if (!ConfigurationRepository.isVersionIndexEnabled(settings)) return;
 
         try {
-            log.info("Initializing version index (.opendistro_security_config_versions)");
+            log.info("Initializing version index ({})", ConfigConstants.OPENDISTRO_SECURITY_CONFIG_VERSIONS_INDEX);
 
-            if (!cr.createOpendistroSecurityConfigVersionsIndexIfAbsent()) {
+            if (!createOpendistroSecurityConfigVersionsIndexIfAbsent()) {
                 log.info("Version index already exists, skipping initialization.");
                 return;
             }
@@ -50,4 +63,44 @@ public class ConfigVersionInitializer {
             log.error("Failed to initialize config version index", e);
         }
     }
+
+    private boolean createOpendistroSecurityConfigVersionsIndexIfAbsent() {
+              try {
+                  final Map<String, Object> indexSettings = ImmutableMap.of(
+                      "index.number_of_shards", 1,
+                      "index.auto_expand_replicas", "0-all"
+                  );
+          
+                  final Map<String, Object> mappings = Map.of(
+                  "properties", Map.of(
+                      "versions", Map.of(
+                          "type", "object",
+                          "properties", Map.of(
+                              "version_id", Map.of( "type", "keyword"),
+                              "timestamp", Map.of("type", "date"),
+                              "modified_by", Map.of("type", "keyword"),
+                              "security_configs", Map.of(
+                                  "type", "object",
+                                  "enabled", false
+                              )
+                          )
+                      )
+                  )
+              );           
+                  log.info("Index request for {}", SecurityConfigVersionsIndex);
+                  final CreateIndexRequest createIndexRequest = new CreateIndexRequest(SecurityConfigVersionsIndex)
+                      .settings(indexSettings)
+                      .mapping(mappings);
+          
+                  final boolean ok = client.admin().indices().create(createIndexRequest).actionGet().isAcknowledged();
+                  log.info("Index {} created?: {}", SecurityConfigVersionsIndex, ok);
+                  return ok;
+              } catch (ResourceAlreadyExistsException resourceAlreadyExistsException) {
+                  log.info("Index {} already exists", SecurityConfigVersionsIndex);
+                  return false;
+              } catch (Exception e) {
+                  log.error("Failed to create index {}", SecurityConfigVersionsIndex, e);
+                  throw e;
+              }
+          }
 }

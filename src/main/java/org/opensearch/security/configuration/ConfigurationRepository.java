@@ -531,48 +531,7 @@
               return false;
           }
       }
-   
-      public boolean createOpendistroSecurityConfigVersionsIndexIfAbsent() {
-          try {
-              final Map<String, Object> indexSettings = ImmutableMap.of(
-                  "index.number_of_shards", 1,
-                  "index.auto_expand_replicas", "0-all"
-              );
-      
-              final Map<String, Object> mappings = Map.of(
-              "properties", Map.of(
-                  "versions", Map.of(
-                      "type", "object",
-                      "properties", Map.of(
-                          "version_id", Map.of( "type", "keyword"),
-                          "timestamp", Map.of("type", "date"),
-                          "modified_by", Map.of("type", "keyword"),
-                          "security_configs", Map.of(
-                              "type", "object",
-                              "enabled", false
-                          )
-                      )
-                  )
-              )
-          );           
-              LOGGER.info("Index request for {}", SecurityConfigVersionsIndex);
-              final CreateIndexRequest createIndexRequest = new CreateIndexRequest(SecurityConfigVersionsIndex)
-                  .settings(indexSettings)
-                  .mapping(mappings);
-      
-              final boolean ok = client.admin().indices().create(createIndexRequest).actionGet().isAcknowledged();
-              LOGGER.info("Index {} created?: {}", SecurityConfigVersionsIndex, ok);
-              return ok;
-          } catch (ResourceAlreadyExistsException resourceAlreadyExistsException) {
-              LOGGER.info("Index {} already exists", SecurityConfigVersionsIndex);
-              return false;
-          } catch (Exception e) {
-              LOGGER.error("Failed to create index {}", SecurityConfigVersionsIndex, e);
-              throw e;
-          }
-      }
-      
-   
+         
       private void waitForSecurityIndexToBeAtLeastYellow() {
           LOGGER.info("Node started, try to initialize it. Wait for at least yellow cluster state....");
           ClusterHealthResponse response = null;
