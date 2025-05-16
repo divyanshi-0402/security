@@ -564,38 +564,6 @@
           }
       }
    
-      public void waitForOpendistroSecurityConfigVersionsIndexToBeAtLeastYellow() {
-          LOGGER.info("Node started, try to initialize it. Wait for at least yellow cluster state....");
-          ClusterHealthResponse response = null;
-          try {
-              response = client.admin()
-                  .cluster()
-                  .health(new ClusterHealthRequest(SecurityConfigVersionsIndex).waitForActiveShards(1).waitForYellowStatus())
-                  .actionGet();
-          } catch (Exception e) {
-              LOGGER.debug("Caught a {} but we just try again ...", e.toString());
-          }
-   
-          while (response == null || response.isTimedOut() || response.getStatus() == ClusterHealthStatus.RED) {
-              LOGGER.debug(
-                  "index '{}' not healthy yet, we try again ... (Reason: {})",
-                  SecurityConfigVersionsIndex,
-                  response == null ? "no response" : (response.isTimedOut() ? "timeout" : "other, maybe red cluster")
-              );
-              try {
-                  TimeUnit.MILLISECONDS.sleep(500);
-              } catch (InterruptedException e) {
-                  // ignore
-                  Thread.currentThread().interrupt();
-              }
-              try {
-                  response = client.admin().cluster().health(new ClusterHealthRequest(SecurityConfigVersionsIndex).waitForYellowStatus()).actionGet();
-              } catch (Exception e) {
-                  LOGGER.debug("Caught again a {} but we just try again ...", e.toString());
-              }
-          }
-      }
-   
       void initSecurityIndex(final ClusterChangedEvent event) {
           if (!event.state().metadata().hasIndex(securityIndex)) {
               securityIndexHandler.createIndex(

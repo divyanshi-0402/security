@@ -11,6 +11,10 @@ import org.opensearch.security.user.User;
 import java.util.Map;
 import com.google.common.collect.ImmutableMap;
 import org.opensearch.transport.client.Client;
+import org.opensearch.action.admin.cluster.health.ClusterHealthResponse;
+import org.opensearch.action.admin.cluster.health.ClusterHealthRequest;
+import org.opensearch.cluster.health.ClusterHealthStatus;
+import java.util.concurrent.TimeUnit;
 
 import org.opensearch.ResourceAlreadyExistsException;
 import org.opensearch.action.admin.indices.create.CreateIndexRequest;
@@ -50,7 +54,7 @@ public class ConfigVersionInitializer {
                 return;
             }
 
-            cr.waitForOpendistroSecurityConfigVersionsIndexToBeAtLeastYellow();
+            waitForOpendistroSecurityConfigVersionsIndexToBeAtLeastYellow();
 
             String nextVersionId = cr.fetchNextVersionId();
             User user = threadContext.getTransient(ConfigConstants.OPENDISTRO_SECURITY_USER);
@@ -101,6 +105,38 @@ public class ConfigVersionInitializer {
               } catch (Exception e) {
                   log.error("Failed to create index {}", SecurityConfigVersionsIndex, e);
                   throw e;
+              }
+          }
+
+    private void waitForOpendistroSecurityConfigVersionsIndexToBeAtLeastYellow() {
+              log.info("Node started, try to initialize it. Wait for at least yellow cluster state....");
+              ClusterHealthResponse response = null;
+              try {
+                  response = client.admin()
+                      .cluster()
+                      .health(new ClusterHealthRequest(SecurityConfigVersionsIndex).waitForActiveShards(1).waitForYellowStatus())
+                      .actionGet();
+              } catch (Exception e) {
+                  log.debug("Caught a {} but we just try again ...", e.toString());
+              }
+       
+              while (response == null || response.isTimedOut() || response.getStatus() == ClusterHealthStatus.RED) {
+                  log.debug(
+                      "index '{}' not healthy yet, we try again ... (Reason: {})",
+                      SecurityConfigVersionsIndex,
+                      response == null ? "no response" : (response.isTimedOut() ? "timeout" : "other, maybe red cluster")
+                  );
+                  try {
+                      TimeUnit.MILLISECONDS.sleep(500);
+                  } catch (InterruptedException e) {
+                      // ignore
+                      Thread.currentThread().interrupt();
+                  }
+                  try {
+                      response = client.admin().cluster().health(new ClusterHealthRequest(SecurityConfigVersionsIndex).waitForYellowStatus()).actionGet();
+                  } catch (Exception e) {
+                      log.debug("Caught again a {} but we just try again ...", e.toString());
+                  }
               }
           }
 }
