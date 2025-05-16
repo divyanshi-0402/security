@@ -45,6 +45,7 @@ import org.opensearch.security.DefaultObjectMapper;
 import org.opensearch.security.auditlog.config.AuditConfig;
 import org.opensearch.security.auth.internal.InternalAuthenticationBackend;
 import org.opensearch.security.configuration.ClusterInfoHolder;
+import org.opensearch.security.configuration.ConfigVersionInitializer;
 import org.opensearch.security.configuration.ConfigurationChangeListener;
 import org.opensearch.security.configuration.ConfigurationMap;
 import org.opensearch.security.configuration.ConfigurationRepository;
@@ -64,6 +65,7 @@ import org.opensearch.security.support.ConfigConstants;
 import org.opensearch.security.support.WildcardMatcher;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.client.Client;
+import org.opensearch.common.util.concurrent.ThreadContext;
 
 import org.greenrobot.eventbus.EventBus;
 import org.greenrobot.eventbus.EventBusBuilder;
@@ -125,6 +127,7 @@ public class DynamicConfigFactory implements Initializable, ConfigurationChangeL
     private final Path configPath;
     private final InternalAuthenticationBackend iab;
     private final ClusterInfoHolder cih;
+    private final ThreadPool threadPool;
 
     SecurityDynamicConfiguration<?> config;
 
@@ -143,6 +146,7 @@ public class DynamicConfigFactory implements Initializable, ConfigurationChangeL
         this.configPath = configPath;
         this.cih = cih;
         this.iab = new InternalAuthenticationBackend(passwordHasher);
+        this.threadPool = threadPool;
 
         if (opensearchSettings.getAsBoolean(ConfigConstants.SECURITY_UNSUPPORTED_LOAD_STATIC_RESOURCES, true)) {
             try {
@@ -273,10 +277,17 @@ public class DynamicConfigFactory implements Initializable, ConfigurationChangeL
         if (cr.isAuditHotReloadingEnabled()) {
             eventBus.post(audit == null ? defaultAuditConfig : audit);
         }
+        
+        ThreadContext threadContext = threadPool.getThreadContext();
+        registerDCFListener(new ConfigVersionInitializer(cr, opensearchSettings, threadContext));
+        
+        eventBus.post(new ConfigInitializedEvent());
 
         initialized.set(true);
     }
 
+    public static class ConfigInitializedEvent {}
+    
     private static ConfigV7 getConfigV7(SecurityDynamicConfiguration<?> sdc) {
         @SuppressWarnings("unchecked")
         SecurityDynamicConfiguration<ConfigV7> c = (SecurityDynamicConfiguration<ConfigV7>) sdc;

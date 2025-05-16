@@ -33,7 +33,6 @@ import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.client.Client;
 
 import static org.opensearch.security.support.ConfigConstants.SECURITY_RESTAPI_ADMIN_ENABLED;
-import static org.opensearch.security.support.ConfigConstants.isVersionIndexEnabled;
 
 public class SecurityRestApiActions {
 
@@ -108,7 +107,7 @@ public class SecurityRestApiActions {
             new CertificatesApiAction(clusterService, threadPool, securityApiDependencies)
         ));
 
-        if(isVersionIndexEnabled(settings)) {
+        if(ConfigurationRepository.isVersionIndexEnabled(settings)) {
             handler.add(new ViewVersionApiAction(
                     clusterService,
                     threadPool,

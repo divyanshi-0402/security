@@ -370,14 +370,7 @@ public class ConfigConstants {
 
     //Security Config Version Index feature flag
     public static final String SECURITY_CONFIG_VERSION_INDEX_ENABLED = "plugins.security.config_version_index.enabled";
-    public static final boolean SECURITY_CONFIG_VERSION_INDEX_ENABLED_DEFAULT = false;
-
-    public static boolean isVersionIndexEnabled(Settings settings) {
-        return settings.getAsBoolean(
-            SECURITY_CONFIG_VERSION_INDEX_ENABLED,
-            SECURITY_CONFIG_VERSION_INDEX_ENABLED_DEFAULT
-        );
-    }    
+    public static final boolean SECURITY_CONFIG_VERSION_INDEX_ENABLED_DEFAULT = false;    
 
     // On-behalf-of endpoints settings
     // CS-SUPPRESS-SINGLE: RegexpSingleline get Extensions Settings

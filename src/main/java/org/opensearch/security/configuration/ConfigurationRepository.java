@@ -100,6 +100,8 @@
  import org.opensearch.security.configuration.SecurityConfigDiffCalculator;
  import org.opensearch.security.configuration.SecurityConfigVersionsLoader;
  import org.opensearch.security.user.User;
+ import static org.opensearch.security.support.ConfigConstants.SECURITY_CONFIG_VERSION_INDEX_ENABLED;
+ import static org.opensearch.security.support.ConfigConstants.SECURITY_CONFIG_VERSION_INDEX_ENABLED_DEFAULT;
  
  import com.google.common.cache.Cache;
  import com.google.common.cache.CacheBuilder;
@@ -313,38 +315,20 @@
                  }
              }
  
-             if (ConfigConstants.isVersionIndexEnabled(settings)) {
-
-                LOGGER.info("Log before creating new system index, .opendistro_security_config_versions");
-                //Creating new system index, .opendistro_security_config_versions
-                createOpendistroSecurityConfigVersionsIndexIfAbsent();
-                waitForOpendistroSecurityConfigVersionsIndexToBeAtLeastYellow();
-    
-                // Building new version document and saving it to the new system index (.opendistro_security_config_versions)
-                String nextVersionId = fetchNextVersionId();
-                final ThreadContext threadContext = threadPool.getThreadContext();
-                User user = threadContext.getTransient(ConfigConstants.OPENDISTRO_SECURITY_USER);
-    
-                String userinfo;
-                if (user != null) {
-                    userinfo = user.getName();
-                } else if ("v1".equals(nextVersionId)) {
-                    userinfo = "system";
-                } else {
-                    userinfo = "unknown";
-                }
-                
-                SecurityConfigVersionDocument.Version<?> version = buildVersionFromSecurityIndex(nextVersionId, userinfo);
-                saveCurrentVersionToSystemIndex(version);
-
-            }
               setupAuditConfigurationIfAny(cl.isAuditConfigDocPresentInIndex());
               LOGGER.info("Node '{}' initialized", clusterService.localNode().getName());
    
           } catch (Exception e) {
               LOGGER.error("Unexpected exception while initializing node " + e, e);
           }
-      }
+      }   
+
+      public static boolean isVersionIndexEnabled(Settings settings) {
+        return settings.getAsBoolean(
+            SECURITY_CONFIG_VERSION_INDEX_ENABLED,
+            SECURITY_CONFIG_VERSION_INDEX_ENABLED_DEFAULT
+        );
+    }  
    
       @SuppressWarnings("unchecked")
       public String fetchNextVersionId() {
@@ -410,7 +394,7 @@
                // Async retention task
             threadPool.generic().submit(() -> {
                 try {
-                    applyRetentionPolicyAsync();
+                    applySecurityConfigVersionIndexRetentionPolicy();
                 } catch (Exception e) {
                     LOGGER.warn("Retention policy async failed", e);
                 }
@@ -449,7 +433,7 @@
      }   
       
       public void updateSecurityConfigVersionAfterUpdate() {
-          if (!ConfigConstants.isVersionIndexEnabled(settings)) {
+          if (!isVersionIndexEnabled(settings)) {
               LOGGER.info("Skipping version update: security config version index is disabled");
               return;
           }
@@ -479,7 +463,7 @@
               // Async retention task
             threadPool.generic().submit(() -> {
                 try {
-                    applyRetentionPolicyAsync();
+                    applySecurityConfigVersionIndexRetentionPolicy();
                 } catch (Exception e) {
                     LOGGER.warn("Retention policy async failed", e);
                 }
@@ -492,7 +476,7 @@
           }
       }
 
-      public void applyRetentionPolicyAsync() {
+      public void applySecurityConfigVersionIndexRetentionPolicy() {
         SecurityConfigVersionDocument document = configVersionsLoader.loadFullDocument();
         List<SecurityConfigVersionDocument.Version<?>> versions = document.getVersions();
 
@@ -547,48 +531,7 @@
               return false;
           }
       }
-   
-      private boolean createOpendistroSecurityConfigVersionsIndexIfAbsent() {
-          try {
-              final Map<String, Object> indexSettings = ImmutableMap.of(
-                  "index.number_of_shards", 1,
-                  "index.auto_expand_replicas", "0-all"
-              );
-      
-              final Map<String, Object> mappings = Map.of(
-              "properties", Map.of(
-                  "versions", Map.of(
-                      "type", "object",
-                      "properties", Map.of(
-                          "version_id", Map.of( "type", "keyword"),
-                          "timestamp", Map.of("type", "date"),
-                          "modified_by", Map.of("type", "keyword"),
-                          "security_configs", Map.of(
-                              "type", "object",
-                              "enabled", false
-                          )
-                      )
-                  )
-              )
-          );           
-              LOGGER.info("Index request for {}", SecurityConfigVersionsIndex);
-              final CreateIndexRequest createIndexRequest = new CreateIndexRequest(SecurityConfigVersionsIndex)
-                  .settings(indexSettings)
-                  .mapping(mappings);
-      
-              final boolean ok = client.admin().indices().create(createIndexRequest).actionGet().isAcknowledged();
-              LOGGER.info("Index {} created?: {}", SecurityConfigVersionsIndex, ok);
-              return ok;
-          } catch (ResourceAlreadyExistsException resourceAlreadyExistsException) {
-              LOGGER.info("Index {} already exists", SecurityConfigVersionsIndex);
-              return false;
-          } catch (Exception e) {
-              LOGGER.error("Failed to create index {}", SecurityConfigVersionsIndex, e);
-              throw e;
-          }
-      }
-      
-   
+         
       private void waitForSecurityIndexToBeAtLeastYellow() {
           LOGGER.info("Node started, try to initialize it. Wait for at least yellow cluster state....");
           ClusterHealthResponse response = null;
@@ -615,38 +558,6 @@
               }
               try {
                   response = client.admin().cluster().health(new ClusterHealthRequest(securityIndex).waitForYellowStatus()).actionGet();
-              } catch (Exception e) {
-                  LOGGER.debug("Caught again a {} but we just try again ...", e.toString());
-              }
-          }
-      }
-   
-      private void waitForOpendistroSecurityConfigVersionsIndexToBeAtLeastYellow() {
-          LOGGER.info("Node started, try to initialize it. Wait for at least yellow cluster state....");
-          ClusterHealthResponse response = null;
-          try {
-              response = client.admin()
-                  .cluster()
-                  .health(new ClusterHealthRequest(SecurityConfigVersionsIndex).waitForActiveShards(1).waitForYellowStatus())
-                  .actionGet();
-          } catch (Exception e) {
-              LOGGER.debug("Caught a {} but we just try again ...", e.toString());
-          }
-   
-          while (response == null || response.isTimedOut() || response.getStatus() == ClusterHealthStatus.RED) {
-              LOGGER.debug(
-                  "index '{}' not healthy yet, we try again ... (Reason: {})",
-                  SecurityConfigVersionsIndex,
-                  response == null ? "no response" : (response.isTimedOut() ? "timeout" : "other, maybe red cluster")
-              );
-              try {
-                  TimeUnit.MILLISECONDS.sleep(500);
-              } catch (InterruptedException e) {
-                  // ignore
-                  Thread.currentThread().interrupt();
-              }
-              try {
-                  response = client.admin().cluster().health(new ClusterHealthRequest(SecurityConfigVersionsIndex).waitForYellowStatus()).actionGet();
               } catch (Exception e) {
                   LOGGER.debug("Caught again a {} but we just try again ...", e.toString());
               }

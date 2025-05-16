@@ -70,7 +70,7 @@ public class RollbackVersionApiTest extends AbstractRestApiUnitTest {
 
         rh.executePostRequest("/.opendistro_security_config_versions/_refresh", "");
 
-        assertThat("Failed to insert config versions doc", response.getStatusCode(), is(201));
+        assertThat("Failed to insert config versions doc", response.getStatusCode(), is(oneOf(200, 201)));
     }
 
       protected String getEndpointPrefix() {

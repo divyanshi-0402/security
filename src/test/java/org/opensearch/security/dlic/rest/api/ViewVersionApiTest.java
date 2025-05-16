@@ -54,8 +54,9 @@ public class ViewVersionApiTest extends AbstractRestApiUnitTest {
             "/.opendistro_security_config_versions/_doc/opendistro_security_config_versions",
             docPayload
         );
+        rh.executePostRequest("/.opendistro_security_config_versions/_refresh", "");
 
-        assertThat("Failed to insert config versions doc", createDoc.getStatusCode(), is(201));
+        assertThat("Failed to insert config versions doc", createDoc.getStatusCode(), is(oneOf(200, 201)));
 
     }
 

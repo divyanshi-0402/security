@@ -744,7 +744,7 @@
 
         when(localClient.index(any())).thenReturn(mockActionFuture(null));
 
-        repo.applyRetentionPolicyAsync();
+        repo.applySecurityConfigVersionIndexRetentionPolicy();
 
         assertThat(document.getVersions().size(), is(10));
         assertThat(document.getVersions().get(0).getVersion_id(), is("v3"));
