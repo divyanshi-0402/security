@@ -9,7 +9,7 @@
 package org.opensearch.security.spi.resources.sharing;
 
 import java.io.IOException;
-import java.util.HashSet;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -37,53 +37,24 @@ import org.opensearch.core.xcontent.XContentParser;
 public class ResourceSharing implements ToXContentFragment, NamedWriteable {
 
     /**
-     * The unique identifier of the resource sharing entry
-     *
-     * TODO If this moves to a shadow index for each resource index, then use the resourceId as the key for both
-     */
-    private String docId;
-
-    /**
-     * The index where the resource is defined
-     */
-    private String sourceIdx;
-
-    /**
-     * The unique identifier of the resource
+     * The unique identifier of the resource and the resource sharing entry
      */
     private String resourceId;
 
     /**
      * Information about who created the resource
      */
-    private CreatedBy createdBy;
+    private final CreatedBy createdBy;
 
     /**
      * Information about with whom the resource is shared with
      */
     private ShareWith shareWith;
 
-    public ResourceSharing(String sourceIdx, String resourceId, CreatedBy createdBy, ShareWith shareWith) {
-        this.sourceIdx = sourceIdx;
+    public ResourceSharing(String resourceId, CreatedBy createdBy, ShareWith shareWith) {
         this.resourceId = resourceId;
         this.createdBy = createdBy;
         this.shareWith = shareWith;
-    }
-
-    public String getDocId() {
-        return docId;
-    }
-
-    public void setDocId(String docId) {
-        this.docId = docId;
-    }
-
-    public String getSourceIdx() {
-        return sourceIdx;
-    }
-
-    public void setSourceIdx(String sourceIdx) {
-        this.sourceIdx = sourceIdx;
     }
 
     public String getResourceId() {
@@ -98,24 +69,26 @@ public class ResourceSharing implements ToXContentFragment, NamedWriteable {
         return createdBy;
     }
 
-    public void setCreatedBy(CreatedBy createdBy) {
-        this.createdBy = createdBy;
-    }
-
     public ShareWith getShareWith() {
         return shareWith;
     }
 
-    public void setShareWith(ShareWith shareWith) {
-        this.shareWith = shareWith;
+    public void share(String accessLevel, Recipients target) {
+        if (shareWith == null) {
+            shareWith = new ShareWith(Map.of(accessLevel, target));
+        } else {
+            Recipients sharedWith = shareWith.atAccessLevel(accessLevel);
+            sharedWith.share(target);
+        }
     }
 
-    public void share(String accessLevel, SharedWithActionGroup target) {
+    public void revoke(String accessLevel, Recipients target) {
         if (shareWith == null) {
-            shareWith = new ShareWith(Set.of(target));
+            // TODO log a warning that this is a noop
+            return;
         } else {
-            SharedWithActionGroup sharedWith = shareWith.atAccessLevel(accessLevel);
-            sharedWith.share(target);
+            Recipients sharedWith = shareWith.atAccessLevel(accessLevel);
+            sharedWith.revoke(target);
         }
     }
 
@@ -124,31 +97,19 @@ public class ResourceSharing implements ToXContentFragment, NamedWriteable {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
         ResourceSharing resourceSharing = (ResourceSharing) o;
-        return Objects.equals(getSourceIdx(), resourceSharing.getSourceIdx())
-            && Objects.equals(getResourceId(), resourceSharing.getResourceId())
+        return Objects.equals(getResourceId(), resourceSharing.getResourceId())
             && Objects.equals(getCreatedBy(), resourceSharing.getCreatedBy())
             && Objects.equals(getShareWith(), resourceSharing.getShareWith());
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(getSourceIdx(), getResourceId(), getCreatedBy(), getShareWith());
+        return Objects.hash(getResourceId(), getCreatedBy(), getShareWith());
     }
 
     @Override
     public String toString() {
-        return "ResourceSharing {"
-            + "sourceIdx='"
-            + sourceIdx
-            + '\''
-            + ", resourceId='"
-            + resourceId
-            + '\''
-            + ", createdBy="
-            + createdBy
-            + ", sharedWith="
-            + shareWith
-            + '}';
+        return "ResourceSharing {" + ", resourceId='" + resourceId + '\'' + ", createdBy=" + createdBy + ", sharedWith=" + shareWith + '}';
     }
 
     @Override
@@ -158,7 +119,6 @@ public class ResourceSharing implements ToXContentFragment, NamedWriteable {
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
-        out.writeString(sourceIdx);
         out.writeString(resourceId);
         createdBy.writeTo(out);
         if (shareWith != null) {
@@ -171,9 +131,9 @@ public class ResourceSharing implements ToXContentFragment, NamedWriteable {
 
     @Override
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
-        builder.startObject().field("source_idx", sourceIdx).field("resource_id", resourceId).field("created_by");
+        builder.startObject().field("resource_id", resourceId).field("created_by");
         createdBy.toXContent(builder, params);
-        if (shareWith != null && !shareWith.getSharedWithActionGroups().isEmpty()) {
+        if (shareWith != null) {
             builder.field("share_with");
             shareWith.toXContent(builder, params);
         }
@@ -181,7 +141,6 @@ public class ResourceSharing implements ToXContentFragment, NamedWriteable {
     }
 
     public static ResourceSharing fromXContent(XContentParser parser) throws IOException {
-        String sourceIdx = null;
         String resourceId = null;
         CreatedBy createdBy = null;
         ShareWith shareWith = null;
@@ -194,9 +153,6 @@ public class ResourceSharing implements ToXContentFragment, NamedWriteable {
                 currentFieldName = parser.currentName();
             } else {
                 switch (Objects.requireNonNull(currentFieldName)) {
-                    case "source_idx":
-                        sourceIdx = parser.text();
-                        break;
                     case "resource_id":
                         resourceId = parser.text();
                         break;
@@ -213,11 +169,10 @@ public class ResourceSharing implements ToXContentFragment, NamedWriteable {
             }
         }
 
-        validateRequiredField("source_idx", sourceIdx);
         validateRequiredField("resource_id", resourceId);
         validateRequiredField("created_by", createdBy);
 
-        return new ResourceSharing(sourceIdx, resourceId, createdBy, shareWith);
+        return new ResourceSharing(resourceId, createdBy, shareWith);
     }
 
     private static <T> void validateRequiredField(String field, T value) {
@@ -233,7 +188,7 @@ public class ResourceSharing implements ToXContentFragment, NamedWriteable {
      * @return True if the resource is owned by the user, false otherwise.
      */
     public boolean isCreatedBy(String userName) {
-        return this.createdBy != null && this.createdBy.getCreator().equals(userName);
+        return this.createdBy != null && this.createdBy.getUsername().equals(userName);
     }
 
     /**
@@ -242,37 +197,23 @@ public class ResourceSharing implements ToXContentFragment, NamedWriteable {
      * @return True if the resource is shared with everyone, false otherwise.
      */
     public boolean isSharedWithEveryone() {
-        return this.shareWith != null
-            && this.shareWith.getSharedWithActionGroups()
-                .stream()
-                .anyMatch(sharedWithActionGroup -> sharedWithActionGroup.getActionGroup().equals("*"));
+        return this.shareWith != null && this.shareWith.isPublic();
     }
 
     /**
      * Checks if the given resource is shared with the specified entities.
      *
-     * @param recipient The recipient entity
-     * @param entities  The set of entities to check for sharing.
-     * @param actionGroups The set of action groups to check for sharing.
+     * @param recipientType The recipient type
+     * @param targets  The set of targets to check for sharing.
+     * @param accessLevel The access level to check for sharing.
      *
      * @return True if the resource is shared with the entities, false otherwise.
      */
-    public boolean isSharedWithEntity(Recipient recipient, Set<String> entities, Set<String> actionGroups) {
-        if (shareWith == null) {
+    public boolean isSharedWithEntity(Recipient recipientType, Set<String> targets, String accessLevel) {
+        if (shareWith == null || shareWith.atAccessLevel(accessLevel) == null) {
             return false;
         }
 
-        return shareWith.getSharedWithActionGroups()
-            .stream()
-            // only keep the action-groups we care about
-            .filter(sWAG -> actionGroups.contains(sWAG.getActionGroup()))
-            // for each matching action-group, grab the recipients’ entities for YOUR recipient
-            .map(sWAG -> sWAG.getSharedWithPerActionGroup().getRecipients().getOrDefault(recipient, Set.of()))
-            // check intersection with input entities
-            .anyMatch(sharedEntities -> {
-                Set<String> intersection = new HashSet<>(sharedEntities);
-                intersection.retainAll(entities);
-                return !intersection.isEmpty();
-            });
+        return shareWith.atAccessLevel(accessLevel).isSharedWithAny(recipientType, targets);
     }
 }

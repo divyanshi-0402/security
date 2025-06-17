@@ -11,9 +11,11 @@ package org.opensearch.security.resources;
 // CS-SUPPRESS-SINGLE: RegexpSingleline get Resource Sharing Extensions
 import java.util.HashSet;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import com.google.common.collect.ImmutableSet;
 
+import org.opensearch.security.spi.resources.ResourceProvider;
 import org.opensearch.security.spi.resources.ResourceSharingExtension;
 
 /**
@@ -34,10 +36,10 @@ public class ResourcePluginInfo {
         return ImmutableSet.copyOf(resourceSharingExtensions);
     }
 
-    // TODO following should be removed once core test framework allows loading extended classes
-    public Set<ResourceSharingExtension> getResourceSharingExtensionsMutable() {
-        return resourceSharingExtensions;
+    public Set<String> getResourceIndices() {
+        return resourceSharingExtensions.stream()
+            .flatMap(ext -> ext.getResourceProviders().stream().map(ResourceProvider::resourceIndexName))
+            .collect(Collectors.toSet());
     }
-
 }
 // CS-ENFORCE-SINGLE
